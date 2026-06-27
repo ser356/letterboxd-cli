@@ -28,8 +28,8 @@ enum Commands {
         #[arg(short, long, default_value_t = 10)]
         count: usize,
 
-        /// Rating mínimo propio para usar una película como semilla (escala 0.5–5.0)
-        #[arg(short, long, default_value_t = 4.0)]
+        /// Rating mínimo propio para semillas (escala 0.5–5.0)
+        #[arg(short = 'r', long, default_value_t = 4.0)]
         min_rating: f32,
     },
 }

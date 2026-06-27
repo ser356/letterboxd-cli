@@ -26,7 +26,11 @@ El binario queda en `~/.cargo/bin/letterboxd-cli`, que ya está en el PATH si ti
 
 ## Configuración
 
-Crea un fichero `.env` en la raíz del proyecto (nunca lo subas al repo):
+Crea el fichero de credenciales en `~/.config/letterboxd-cli/.env` para que funcione desde cualquier directorio:
+
+```bash
+mkdir -p ~/.config/letterboxd-cli
+```
 
 ```env
 LETTERBOXD_CLIENT_ID=<tu_client_id>
@@ -37,7 +41,7 @@ TMDB_API_KEY=<tu_tmdb_api_key>
 TMDB_BEARER_TOKEN=<tu_tmdb_bearer_token>
 ```
 
-El `.env` se lee desde el directorio de trabajo donde ejecutes el comando.
+También se puede poner un `.env` en el directorio de trabajo actual (útil durante el desarrollo). Si existen los dos, el global tiene prioridad.
 
 ---
 
