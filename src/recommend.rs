@@ -21,7 +21,7 @@ fn tmdb_id_from_entry(entry: &LogEntry) -> Option<u64> {
         .and_then(|l| l.id.parse::<u64>().ok())
 }
 
-fn spinner(msg: &'static str) -> ProgressBar {
+fn spinner(msg: impl Into<std::borrow::Cow<'static, str>>) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::with_template("{spinner:.cyan}  {msg}")
@@ -33,7 +33,7 @@ fn spinner(msg: &'static str) -> ProgressBar {
     pb
 }
 
-fn progress_bar(total: u64, msg: &'static str) -> ProgressBar {
+fn progress_bar(total: u64, msg: impl Into<std::borrow::Cow<'static, str>>) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::with_template(
@@ -71,7 +71,12 @@ pub async fn build_recommendations(
     let mut candidate_movies: HashMap<u64, TmdbMovie> = HashMap::new();
     let mut freq: HashMap<u64, u32> = HashMap::new();
 
-    let pb = progress_bar(seeds.len() as u64, "Consultando TMDB…");
+    let seed_msg = format!(
+        "Consultando TMDB…  ({} semillas con ★ ≥ {})",
+        seeds.len(),
+        min_rating
+    );
+    let pb = progress_bar(seeds.len() as u64, seed_msg);
     for seed_id in &seeds {
         let recs = tmdb_client.get_recommendations(*seed_id).await?;
         for movie in recs {
