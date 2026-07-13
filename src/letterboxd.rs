@@ -38,13 +38,8 @@ struct LogEntriesResponse {
 
 #[derive(Debug, Deserialize)]
 struct WatchlistResponse {
-    items: Vec<WatchlistItem>,
+    items: Vec<Film>,
     next: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WatchlistItem {
-    film: Film,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,7 +236,7 @@ impl<'a> LetterboxdClient<'a> {
         let mut cursor: Option<String> = None;
 
         loop {
-            let mut url = format!("{BASE_URL}/members/{member_id}/watchlist?perPage=100");
+            let mut url = format!("{BASE_URL}/member/{member_id}/watchlist?perPage=100");
             if let Some(ref c) = cursor {
                 url.push_str(&format!("&cursor={c}"));
             }
@@ -263,7 +258,7 @@ impl<'a> LetterboxdClient<'a> {
             let page: WatchlistResponse =
                 resp.json().await.context("Error al parsear watchlist")?;
 
-            all_films.extend(page.items.into_iter().map(|i| i.film));
+            all_films.extend(page.items);
 
             match page.next {
                 Some(next_cursor) => cursor = Some(next_cursor),

@@ -133,24 +133,54 @@ async fn main() -> Result<()> {
         }
         Commands::Keychain { action } => match action {
             KeychainAction::Import => {
-                let config = Config::from_env_file_only()?;
+                config::load_env_files();
 
-                keychain::set(keychain::CLIENT_ID, &config.client_id)?;
-                if !config.client_secret.is_empty() {
-                    keychain::set(keychain::CLIENT_SECRET, &config.client_secret)?;
+                let entries = [
+                    ("LETTERBOXD_CLIENT_ID", keychain::CLIENT_ID),
+                    ("LETTERBOXD_CLIENT_SECRET", keychain::CLIENT_SECRET),
+                    ("LETTERBOXD_REFRESH_TOKEN", keychain::REFRESH_TOKEN),
+                    ("LETTERBOXD_USERNAME", keychain::USERNAME),
+                    ("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN),
+                ];
+
+                let mut imported = 0usize;
+                let mut skipped = Vec::new();
+                for (env_key, kc) in entries {
+                    match std::env::var(env_key) {
+                        Ok(val) if !val.is_empty() => {
+                            keychain::set(kc, &val)?;
+                            imported += 1;
+                            println!("  {} {} → {}", "✔".green(), env_key, kc);
+                        }
+                        _ => skipped.push(env_key),
+                    }
                 }
-                keychain::set(keychain::REFRESH_TOKEN, &config.refresh_token)?;
-                keychain::set(keychain::TMDB_BEARER_TOKEN, &config.tmdb_bearer_token)?;
+
+                if imported == 0 {
+                    anyhow::bail!(
+                        "No se encontró ninguna variable en el entorno ni en \
+                         ~/.config/letterboxd-cli/.env. Crea un .env con al \
+                         menos una de las variables antes de importar."
+                    );
+                }
 
                 println!(
-                    "{}",
-                    "Credenciales guardadas en el Keychain de macOS.".green()
+                    "\n{}",
+                    format!("{imported} credencial(es) guardada(s) en el Keychain.").green()
                 );
+                if !skipped.is_empty() {
+                    println!(
+                        "  {} sin cambios (no estaban en .env): {}",
+                        "•".dimmed(),
+                        skipped.join(", ").dimmed()
+                    );
+                }
             }
             KeychainAction::Clear => {
                 keychain::delete(keychain::CLIENT_ID)?;
                 keychain::delete(keychain::CLIENT_SECRET)?;
                 keychain::delete(keychain::REFRESH_TOKEN)?;
+                keychain::delete(keychain::USERNAME)?;
                 keychain::delete(keychain::TMDB_BEARER_TOKEN)?;
 
                 println!(

@@ -26,7 +26,12 @@ El binario queda en `~/.cargo/bin/letterboxd-cli`, que ya está en el PATH si ti
 
 ## Configuración
 
-Crea el fichero de credenciales en `~/.config/letterboxd-cli/.env` para que funcione desde cualquier directorio:
+La fuente de credenciales depende del sistema operativo:
+
+- **macOS: Keychain, sin fallback a `.env`.** Poblar el Keychain con `letterboxd-cli keychain import` (ver más abajo). Si una credencial no está en el Keychain, el CLI aborta con un mensaje claro.
+- **Linux / Windows:** variables de entorno o `.env`.
+
+### `.env` (Linux/Windows, o macOS solo para importar)
 
 ```bash
 mkdir -p ~/.config/letterboxd-cli
@@ -40,23 +45,31 @@ LETTERBOXD_USERNAME=<tu_username>
 TMDB_BEARER_TOKEN=<tu_tmdb_bearer_token>
 ```
 
-También se puede poner un `.env` en el directorio de trabajo actual (útil durante el desarrollo). Si existen los dos, el global tiene prioridad.
+Se busca primero `~/.config/letterboxd-cli/.env`, y como fallback `.env` en el directorio actual.
 
-### Credenciales en el Keychain de macOS (opcional)
+### Credenciales en el Keychain de macOS
 
-En macOS, en vez de (o además de) `.env`, las credenciales sensibles se pueden guardar en el
-Keychain del propio Mac:
+En macOS todas las credenciales viven en el Keychain, incluidas `LETTERBOXD_USERNAME` y
+`TMDB_BEARER_TOKEN`. Flujo típico:
 
 ```bash
-letterboxd-cli keychain import   # lee el .env actual y guarda cada credencial en el Keychain
-letterboxd-cli keychain clear    # elimina esas credenciales del Keychain
+# 1. Crea un .env temporal con las variables que quieras importar
+#    (basta con las que falten; import es tolerante)
+vim ~/.config/letterboxd-cli/.env
+
+# 2. Vuelca al Keychain
+letterboxd-cli keychain import
+
+# 3. (Opcional) borra el .env — las credenciales viven ya en el Keychain
+rm ~/.config/letterboxd-cli/.env
+
+# Para eliminarlas del Keychain más adelante:
+letterboxd-cli keychain clear
 ```
 
-En cada arranque, cada credencial se busca primero en el Keychain y, si no está ahí, se cae a
-`.env` — así que puedes borrar el `.env` una vez importado, si prefieres no tener el secreto en un
-fichero de texto plano.
-
-`LETTERBOXD_USERNAME` no es sensible y siempre se lee de `.env`/entorno.
+En el Keychain aparecen como items de contraseña genérica con `Cuenta = letterboxd-cli` y
+`Ubicación = letterboxd-<credencial>` (`letterboxd-client-id`, `letterboxd-client-secret`,
+`letterboxd-refresh-token`, `letterboxd-username`, `letterboxd-tmdb-bearer-token`).
 
 > **Nota:** esto usa el Keychain local de ese Mac (login keychain), no el Keychain de iCloud. Un
 > item de Keychain solo se sincroniza por iCloud si se marca explícitamente como
@@ -143,7 +156,7 @@ Al cambiar `count` o `min_rating` con las teclas, hay que pulsar `r` para recarg
 ### keychain (solo macOS)
 
 Gestiona las credenciales guardadas en el Keychain de macOS. Ver [Credenciales en el Keychain de
-macOS](#credenciales-en-el-keychain-de-macos-opcional) arriba.
+macOS](#credenciales-en-el-keychain-de-macos) arriba.
 
 ```bash
 letterboxd-cli keychain import

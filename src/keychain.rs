@@ -1,11 +1,17 @@
 //! Acceso a credenciales guardadas en el Keychain de macOS. En cualquier otro
-//! sistema operativo, `get` siempre devuelve `None` (fallback silencioso a
-//! `.env`) y `set`/`delete` fallan con un mensaje claro.
+//! sistema operativo, `get` siempre devuelve `None` y `set`/`delete` fallan
+//! con un mensaje claro.
+//!
+//! Convención en el Keychain: cada credencial es un item genérico con
+//! `service` = nombre de la credencial (p.ej. `letterboxd-client-id`) y
+//! `account` = nombre de la app (`letterboxd-cli`). Así aparecen agrupadas
+//! en Acceso a Llaveros con nombres legibles.
 
-pub const CLIENT_ID: &str = "letterboxd_client_id";
-pub const CLIENT_SECRET: &str = "letterboxd_client_secret";
-pub const REFRESH_TOKEN: &str = "letterboxd_refresh_token";
-pub const TMDB_BEARER_TOKEN: &str = "tmdb_bearer_token";
+pub const CLIENT_ID: &str = "letterboxd-client-id";
+pub const CLIENT_SECRET: &str = "letterboxd-client-secret";
+pub const REFRESH_TOKEN: &str = "letterboxd-refresh-token";
+pub const TMDB_BEARER_TOKEN: &str = "letterboxd-tmdb-bearer-token";
+pub const USERNAME: &str = "letterboxd-username";
 
 pub use imp::{delete, get, set};
 
@@ -14,21 +20,21 @@ mod imp {
     use anyhow::Result;
     use keyring::{Entry, Error as KeyringError};
 
-    const SERVICE: &str = "letterboxd-cli";
+    const ACCOUNT: &str = "letterboxd-cli";
 
     /// Lee una credencial del Keychain. `None` si no existe o si el Keychain
     /// no está accesible (por ejemplo, sesión sin desbloquear).
-    pub fn get(account: &str) -> Option<String> {
-        Entry::new(SERVICE, account).ok()?.get_password().ok()
+    pub fn get(service: &str) -> Option<String> {
+        Entry::new(service, ACCOUNT).ok()?.get_password().ok()
     }
 
-    pub fn set(account: &str, value: &str) -> Result<()> {
-        Entry::new(SERVICE, account)?.set_password(value)?;
+    pub fn set(service: &str, value: &str) -> Result<()> {
+        Entry::new(service, ACCOUNT)?.set_password(value)?;
         Ok(())
     }
 
-    pub fn delete(account: &str) -> Result<()> {
-        match Entry::new(SERVICE, account)?.delete_credential() {
+    pub fn delete(service: &str) -> Result<()> {
+        match Entry::new(service, ACCOUNT)?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(e) => Err(e.into()),
         }
@@ -39,15 +45,15 @@ mod imp {
 mod imp {
     use anyhow::Result;
 
-    pub fn get(_account: &str) -> Option<String> {
+    pub fn get(_service: &str) -> Option<String> {
         None
     }
 
-    pub fn set(_account: &str, _value: &str) -> Result<()> {
+    pub fn set(_service: &str, _value: &str) -> Result<()> {
         anyhow::bail!("El Keychain solo está disponible en macOS")
     }
 
-    pub fn delete(_account: &str) -> Result<()> {
+    pub fn delete(_service: &str) -> Result<()> {
         anyhow::bail!("El Keychain solo está disponible en macOS")
     }
 }

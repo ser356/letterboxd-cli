@@ -23,28 +23,57 @@ fn load_dotenv() {
     dotenvy::dotenv().ok();
 }
 
-/// Busca una credencial primero en el Keychain (macOS) y, si no está, en las
-/// variables de entorno / `.env`.
-fn resolve(env_key: &str, keychain_account: &str) -> Option<String> {
-    keychain::get(keychain_account).or_else(|| std::env::var(env_key).ok())
+/// Carga las variables desde `.env` (global y local). Exporta esta función
+/// para que `keychain import` pueda leer del entorno tras poblarlo.
+pub fn load_env_files() {
+    load_dotenv();
+}
+
+/// Busca una credencial sensible.
+///
+/// * En macOS: **solo** el Keychain. No hay fallback a `.env` — para importar
+///   las credenciales al Keychain, usa `letterboxd-cli keychain import`.
+/// * En otros sistemas: variables de entorno / `.env`.
+#[cfg(target_os = "macos")]
+fn resolve(_env_key: &str, keychain_service: &str) -> Option<String> {
+    keychain::get(keychain_service)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve(env_key: &str, _keychain_service: &str) -> Option<String> {
+    std::env::var(env_key).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn missing(env_key: &str, keychain_service: &str) -> String {
+    format!(
+        "{env_key} no está en el Keychain (item `{keychain_service}`). \
+         Ejecuta `letterboxd-cli keychain import` para importarla desde .env."
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn missing(env_key: &str, _keychain_service: &str) -> String {
+    format!("{env_key} no está definida")
 }
 
 impl Config {
-    /// Carga la configuración para uso normal de la app: cada credencial se
-    /// busca primero en el Keychain de macOS y, si no está ahí, en `.env`.
+    /// Carga la configuración para uso normal de la app. En macOS las
+    /// credenciales sensibles se leen **solo** del Keychain; en otros
+    /// sistemas se leen de `.env`/entorno.
     pub fn from_env() -> Result<Self> {
         load_dotenv();
 
         let client_id = resolve("LETTERBOXD_CLIENT_ID", keychain::CLIENT_ID)
-            .context("LETTERBOXD_CLIENT_ID no está definida (ni en el Keychain ni en .env)")?;
+            .with_context(|| missing("LETTERBOXD_CLIENT_ID", keychain::CLIENT_ID))?;
         let client_secret =
             resolve("LETTERBOXD_CLIENT_SECRET", keychain::CLIENT_SECRET).unwrap_or_default();
         let refresh_token = resolve("LETTERBOXD_REFRESH_TOKEN", keychain::REFRESH_TOKEN)
-            .context("LETTERBOXD_REFRESH_TOKEN no está definida (ni en el Keychain ni en .env)")?;
-        let username =
-            std::env::var("LETTERBOXD_USERNAME").context("LETTERBOXD_USERNAME no está definida")?;
+            .with_context(|| missing("LETTERBOXD_REFRESH_TOKEN", keychain::REFRESH_TOKEN))?;
+        let username = resolve("LETTERBOXD_USERNAME", keychain::USERNAME)
+            .with_context(|| missing("LETTERBOXD_USERNAME", keychain::USERNAME))?;
         let tmdb_bearer_token = resolve("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN)
-            .context("TMDB_BEARER_TOKEN no está definida (ni en el Keychain ni en .env)")?;
+            .with_context(|| missing("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN))?;
 
         Ok(Self {
             client_id,
@@ -56,7 +85,10 @@ impl Config {
     }
 
     /// Carga la configuración solo desde `.env`/variables de entorno,
-    /// ignorando el Keychain. La usa `keychain import` para saber qué guardar.
+    /// ignorando el Keychain. Ya no se usa (la importación al Keychain es
+    /// tolerante y no requiere que todas las variables estén presentes),
+    /// pero se mantiene por retrocompatibilidad de la API interna.
+    #[allow(dead_code)]
     pub fn from_env_file_only() -> Result<Self> {
         load_dotenv();
 
