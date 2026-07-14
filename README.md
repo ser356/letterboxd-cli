@@ -45,7 +45,7 @@ Actualizar: `brew upgrade --cask videodrome`.
 En PowerShell **no admin**:
 
 ```powershell
-irm https://ser356.github.io/letterboxd-cli/install.ps1 | iex
+irm https://ser356.github.io/videodrome/install.ps1 | iex
 ```
 
 Instala Scoop si falta, añade los buckets `extras` (VLC) y `ser356`, y
@@ -64,7 +64,7 @@ Actualizar: `scoop update videodrome`.
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/letterboxd-cli/releases/latest/download/videodrome-v0.2.0-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v0.2.0-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
 sudo apt install vlc  # o el gestor que uses
 ```
@@ -74,8 +74,8 @@ sudo apt install vlc  # o el gestor que uses
 CLI-only (sin GUI, no requiere Node/webkit):
 
 ```bash
-git clone https://github.com/ser356/letterboxd-cli
-cd letterboxd-cli
+git clone https://github.com/ser356/videodrome
+cd videodrome
 cargo install --path .
 ```
 
