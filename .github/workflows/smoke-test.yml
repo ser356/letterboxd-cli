@@ -57,24 +57,3 @@ jobs:
         run: |
           which letterboxd-cli
           letterboxd-cli --help
-
-  homebrew-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Instalar Homebrew (Linuxbrew)
-        run: |
-          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
-
-      - name: Añadir tap + trust
-        run: |
-          brew tap ser356/tap
-          brew trust ser356/tap
-
-      - name: Instalar letterboxd-cli (incluye VLC como dep)
-        run: brew install letterboxd-cli
-
-      - name: Verificar binario
-        run: |
-          which letterboxd-cli
-          letterboxd-cli --help

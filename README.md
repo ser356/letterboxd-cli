@@ -36,9 +36,8 @@ Actualización: `brew upgrade letterboxd-cli`.
 > `brew trust` es un paso obligatorio desde Homebrew 4.5+ para taps de
 > terceros — solo hay que hacerlo una vez por tap.
 >
-> En Linux VLC se instala automáticamente como dependencia. En macOS hay
-> que instalarlo aparte con `brew install --cask vlc` porque Homebrew ya
-> no permite que una fórmula dependa de un cask.
+> VLC se instala aparte porque Homebrew ya no permite que una fórmula
+> dependa de un cask.
 >
 > Solo Apple Silicon (M1+). Los Macs Intel deben usar la vía "compilar
 > desde código" más abajo — los runners `macos-13` de GitHub Actions
@@ -47,21 +46,32 @@ Actualización: `brew upgrade letterboxd-cli`.
 ### Windows · Scoop ⭐️
 
 ```powershell
-scoop bucket add extras                                                  # si aún no lo tienes
+scoop bucket add extras
 scoop bucket add ser356 https://github.com/ser356/scoop-bucket
 scoop install ser356/letterboxd-cli
 ```
 
 Instala también VLC como dependencia. Actualización: `scoop update letterboxd-cli`.
 
-### Linux / NixOS · Nix ⭐️
+### Linux ⭐️
+
+En Linux la vía recomendada es **compilar desde código con `cargo`** (rustup
+suele venir preinstalado en distros de desarrollo). Instala VLC con tu
+gestor nativo:
+
+```bash
+cargo install --git https://github.com/ser356/letterboxd-cli
+sudo apt install vlc            # o dnf / pacman según distro
+```
+
+**NixOS / Nix**: si usas Nix hay un flake preparado:
 
 ```bash
 nix profile install github:ser356/letterboxd-cli
 ```
 
-Compila desde código en tu máquina (build reproducible). VLC queda en el
-`PATH` del binario automáticamente.
+Compila desde código de forma reproducible y trae VLC en el `PATH` del
+binario automáticamente.
 
 ### Alternativa 1 — Binarios prebuilt (releases)
 

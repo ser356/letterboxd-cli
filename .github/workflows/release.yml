@@ -159,11 +159,9 @@ jobs:
         run: |
           cd artifacts
           SHA_MAC_ARM64=$(sha256sum letterboxd-cli-macos-arm64.tar.gz | awk '{print $1}')
-          SHA_LINUX_X86_64=$(sha256sum letterboxd-cli-linux-x86_64.tar.gz | awk '{print $1}')
           SHA_WIN_X86_64=$(sha256sum letterboxd-cli-windows-x86_64.zip | awk '{print $1}')
-          echo "mac_arm64=$SHA_MAC_ARM64"       >> "$GITHUB_OUTPUT"
-          echo "linux_x86_64=$SHA_LINUX_X86_64" >> "$GITHUB_OUTPUT"
-          echo "win_x86_64=$SHA_WIN_X86_64"     >> "$GITHUB_OUTPUT"
+          echo "mac_arm64=$SHA_MAC_ARM64" >> "$GITHUB_OUTPUT"
+          echo "win_x86_64=$SHA_WIN_X86_64" >> "$GITHUB_OUTPUT"
 
       # ---------- HOMEBREW TAP ----------
       - name: Render fórmula Homebrew
@@ -172,7 +170,6 @@ jobs:
           sed \
             -e "s|{{VERSION}}|${{ steps.v.outputs.version }}|g" \
             -e "s|{{SHA_MAC_ARM64}}|${{ steps.sha.outputs.mac_arm64 }}|g" \
-            -e "s|{{SHA_LINUX_X86_64}}|${{ steps.sha.outputs.linux_x86_64 }}|g" \
             packaging/homebrew/letterboxd-cli.rb.tmpl > out/letterboxd-cli.rb
           echo "----- fórmula generada -----"
           cat out/letterboxd-cli.rb

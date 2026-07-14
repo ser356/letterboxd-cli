@@ -1,7 +1,10 @@
-# Homebrew formula template — el workflow `publish-packages.yml` sustituye
-# los placeholders `{{VERSION}}`, `{{SHA_MAC_ARM64}}` y `{{SHA_LINUX_X86_64}}`
-# con los valores reales de cada release, y hace push del resultado al repo
-# `ser356/homebrew-tap` (fichero `Formula/letterboxd-cli.rb`).
+# Homebrew formula template — el workflow de release sustituye los
+# placeholders `{{VERSION}}` y `{{SHA_MAC_ARM64}}` con los valores reales
+# de cada release, y hace push del resultado al repo `ser356/homebrew-tap`
+# (fichero `Formula/letterboxd-cli.rb`).
+#
+# Solo macOS Apple Silicon. Para Linux se recomienda `cargo install --git`
+# o el flake.nix del repo.
 class LetterboxdCli < Formula
   desc "Letterboxd recs + torrent search + BitTorrent streaming"
   homepage "https://github.com/ser356/letterboxd-cli"
@@ -18,20 +21,8 @@ class LetterboxdCli < Formula
     # instalar vía `cargo install --git https://github.com/ser356/letterboxd-cli`.
   end
 
-  on_linux do
-    on_intel do
-      url "https://github.com/ser356/letterboxd-cli/releases/download/v#{version}/letterboxd-cli-linux-x86_64.tar.gz"
-      sha256 "{{SHA_LINUX_X86_64}}"
-    end
-  end
-
-  # VLC en Linux existe como fórmula normal y se puede declarar dep dura.
-  # En macOS VLC solo está disponible como cask (GUI app), y Homebrew ya
-  # no permite que una fórmula dependa de un cask. Se documenta en caveats
-  # como paso manual.
-  on_linux do
-    depends_on "vlc"
-  end
+  # VLC solo existe como cask en macOS y una fórmula no puede depender de
+  # un cask en Homebrew moderno. Se documenta como paso manual en caveats.
 
   def install
     bin.install "letterboxd-cli"
@@ -43,9 +34,33 @@ class LetterboxdCli < Formula
       Las credenciales de la app ya vienen bakeadas — no tienes que
       configurar nada más.
 
-      Para el streaming BitTorrent hace falta VLC. En macOS instálalo
-      con:
+      Para el streaming BitTorrent hace falta VLC:
         brew install --cask vlc
+    EOS
+  end
+
+  test do
+    assert_match "letterboxd-cli", shell_output("#{bin}/letterboxd-cli --help 2>&1", 2)
+  end
+end
+
+  def install
+    bin.install "letterboxd-cli"
+  end
+
+  def caveats
+    <<~EOS
+      La primera vez que abras la TUI, se te pedirá login de Letterboxd.
+      Las credenciales de la app ya vienen bakeadas — no tienes que
+      configurar nada más.
+
+      Para el streaming BitTorrent hace falta VLC. Instálalo con el
+      gestor apropiado de tu sistema:
+
+        macOS:  brew install --cask vlc
+        Debian: sudo apt install vlc
+        Fedora: sudo dnf install vlc
+        Arch:   sudo pacman -S vlc
     EOS
   end
 
