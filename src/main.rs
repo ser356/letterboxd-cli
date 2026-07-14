@@ -1,6 +1,8 @@
 mod auth;
 mod config;
 mod credentials;
+#[cfg(feature = "gui")]
+mod gui;
 mod keychain;
 mod letterboxd;
 mod progress;
@@ -118,15 +120,46 @@ enum KeychainAction {
     Clear,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(feature = "gui")]
+fn has_display() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Sin subcomando explícito + feature `gui` activa + hay display:
+    // arrancamos la GUI Tauri. Tauri exige el main thread, así que no
+    // podemos vivir dentro de `#[tokio::main]`. En el resto de casos
+    // creamos un runtime tokio manual antes de despachar el subcomando.
+    #[cfg(feature = "gui")]
+    if cli.command.is_none() && has_display() {
+        let config = Config::from_env()?;
+        let http = reqwest::Client::builder()
+            .user_agent("letterboxd-cli/0.1")
+            .build()?;
+        return gui::run(config, http);
+    }
 
     let command = cli.command.unwrap_or(Commands::Tui {
         count: 10,
         min_rating: 4.0,
     });
 
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(dispatch(command))
+}
+
+async fn dispatch(command: Commands) -> Result<()> {
     match command {
         Commands::Recommend {
             count,
