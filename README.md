@@ -8,21 +8,81 @@ CLI en Rust que genera recomendaciones de películas a partir de tu historial, w
 
 ## Requisitos
 
+- **VLC** para la funcionalidad de streaming BitTorrent (`s` en la TUI). Se instala
+  automáticamente si usas alguno de los gestores de paquetes recomendados abajo.
+
+Para compilar desde código además:
 - Rust 1.75+ (`rustup` recomendado)
-- Credenciales de la [API de Letterboxd](https://letterboxd.com/api-beta/) (solicitud manual)
-- API key de [TMDB](https://www.themoviedb.org/settings/api)
 
 ---
 
 ## Instalación
 
+Recomendado: **usa un gestor de paquetes**. Instala el CLI, sus dependencias
+(VLC) y las actualizaciones futuras en un solo sitio, sin disparar SmartScreen
+(Windows) ni Gatekeeper (macOS).
+
+### macOS · Homebrew ⭐️
+
 ```bash
-git clone <repo>
+brew tap ser356/tap
+brew install letterboxd-cli
+```
+
+Instala también VLC como dependencia (~150 MB). Actualización:
+`brew upgrade letterboxd-cli`.
+
+> Solo Apple Silicon (M1+). Los Macs Intel deben usar la vía "compilar desde
+> código" más abajo — los runners `macos-13` de GitHub Actions están
+> deprecated y no publicamos binario x86_64.
+
+### Windows · Scoop ⭐️
+
+```powershell
+scoop bucket add extras                                                  # si aún no lo tienes
+scoop bucket add ser356 https://github.com/ser356/scoop-bucket
+scoop install ser356/letterboxd-cli
+```
+
+Instala también VLC como dependencia. Actualización: `scoop update letterboxd-cli`.
+
+### Linux / NixOS · Nix ⭐️
+
+```bash
+nix profile install github:ser356/letterboxd-cli
+```
+
+Compila desde código en tu máquina (build reproducible). VLC queda en el
+`PATH` del binario automáticamente.
+
+### Alternativa 1 — Binarios prebuilt (releases)
+
+Si no usas ningún gestor de paquetes, descarga el archivo de tu plataforma
+desde [Releases](https://github.com/ser356/letterboxd-cli/releases):
+
+- `letterboxd-cli-macos-arm64.tar.gz`
+- `letterboxd-cli-linux-x86_64.tar.gz`
+- `letterboxd-cli-windows-x86_64.zip`
+
+Descomprime, mueve el binario a algún directorio del `PATH`, e instala VLC
+por tu cuenta. En macOS puede saltar Gatekeeper la primera vez — quítale la
+cuarentena con:
+
+```bash
+xattr -d com.apple.quarantine letterboxd-cli
+```
+
+### Alternativa 2 — Compilar desde código
+
+```bash
+git clone https://github.com/ser356/letterboxd-cli
 cd letterboxd-cli
 cargo install --path .
 ```
 
-El binario queda en `~/.cargo/bin/letterboxd-cli`, que ya está en el PATH si tienes Rust instalado con `rustup`.
+El binario queda en `~/.cargo/bin/letterboxd-cli`, que ya está en el `PATH`
+si tienes Rust instalado con `rustup`. Instala VLC por tu cuenta si
+quieres usar streaming.
 
 ---
 

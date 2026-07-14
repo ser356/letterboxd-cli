@@ -1,0 +1,23 @@
+{
+  "version": "{{VERSION}}",
+  "description": "Letterboxd recs + torrent search + BitTorrent streaming",
+  "homepage": "https://github.com/ser356/letterboxd-cli",
+  "license": "MIT",
+  "url": "https://github.com/ser356/letterboxd-cli/releases/download/v{{VERSION}}/letterboxd-cli-windows-x86_64.zip",
+  "hash": "{{SHA_WIN_X86_64}}",
+  "bin": "letterboxd-cli.exe",
+  "depends": "extras/vlc",
+  "suggest": {
+    "VLC": "extras/vlc"
+  },
+  "notes": [
+    "VLC se instaló automáticamente como dependencia (bucket 'extras').",
+    "La primera vez que abras la TUI, se te pedirá login de Letterboxd."
+  ],
+  "checkver": {
+    "github": "https://github.com/ser356/letterboxd-cli"
+  },
+  "autoupdate": {
+    "url": "https://github.com/ser356/letterboxd-cli/releases/download/v$version/letterboxd-cli-windows-x86_64.zip"
+  }
+}
