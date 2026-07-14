@@ -1,3 +1,15 @@
+// En Windows, la build con GUI se compila como `windows` subsystem para
+// que al hacer doble click en el atajo del Start Menu NO se abra también
+// una ventana de consola (además de robar el foco y romper los hotkeys
+// de la Tauri window). Para CLI/TUI seguimos usando la consola: si el
+// usuario invoca el binario desde PowerShell/cmd con argumentos, en
+// `main()` hacemos `AttachConsole(ATTACH_PARENT_PROCESS)` para que
+// `println!`/`eprintln!` acaben en el terminal que le lanzó.
+#![cfg_attr(
+    all(target_os = "windows", feature = "gui", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod auth;
 mod config;
 mod credentials;
@@ -146,6 +158,24 @@ fn http_client() -> Result<reqwest::Client> {
 }
 
 fn main() -> Result<()> {
+    // Windows: si nos han lanzado desde una terminal (con subcomando),
+    // engancharse a la consola padre para que la salida del CLI/TUI
+    // aparezca allí. En modo GUI (sin args) no atachamos → sin ventana
+    // extra de cmd. Ver la nota de `windows_subsystem` arriba del fichero.
+    #[cfg(all(target_os = "windows", feature = "gui", not(debug_assertions)))]
+    {
+        if std::env::args_os().len() > 1 {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn AttachConsole(dw_process_id: u32) -> i32;
+            }
+            const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+            unsafe {
+                AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+        }
+    }
+
     let cli = Cli::parse();
 
     // Sin subcomando explícito + feature `gui` activa + hay display:

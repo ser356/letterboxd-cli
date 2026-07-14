@@ -466,6 +466,19 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
     };
 
     tauri::Builder::default()
+        // Single-instance: si el usuario hace doble click en el atajo del
+        // Start Menu varias veces (o Windows re-lanza el .exe por
+        // cualquier motivo), en lugar de abrir N ventanas Tauri, el
+        // segundo (y sucesivos) procesos salen inmediatamente después de
+        // notificar al primero, que trae su ventana al foco.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]

@@ -33,6 +33,13 @@ if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
     Write-Host "==> Scoop ya instalado." -ForegroundColor Cyan
 }
 
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "==> Instalando git (necesario para 'scoop bucket add')..." -ForegroundColor Cyan
+    scoop install git
+} else {
+    Write-Host "==> git ya instalado." -ForegroundColor Cyan
+}
+
 function Ensure-Bucket {
     param([string]$Name, [string]$Url = '')
     $buckets = scoop bucket list 2>$null | Out-String

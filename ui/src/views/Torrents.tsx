@@ -188,7 +188,12 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     { key: 'b', hint: '', run: () => nav(backTo) },
     { key: 'Escape', hint: 'Volver', run: () => nav(backTo) },
   ]
-  useHotkeys(hotkeys, [current, stream, pendingSubPath, backTo])
+  // Cuando la SubsSheet está abierta, sus hotkeys (Enter, j/k, Esc) toman
+  // el control. Si dejamos las de Torrents activas, Enter dispara AMBOS
+  // handlers → se abre qBittorrent al elegir un subtítulo.
+  useHotkeys(hotkeys, [current, stream, pendingSubPath, backTo], {
+    enabled: !subsOpen,
+  })
 
   const label = result?.title
     ? `${result.title}${result.year ? ` (${result.year})` : ''}`

@@ -122,7 +122,25 @@ pub async fn search(
         .await
         .context("Respuesta de OpenSubtitles no parseable como JSON")?;
 
-    Ok(json.data.into_iter().filter_map(parse_item).collect())
+    let mut subs: Vec<Subtitle> = json.data.into_iter().filter_map(parse_item).collect();
+
+    // OpenSubtitles ordena por `download_count` global, así que el inglés
+    // arrasa aunque el usuario pida `es,en,fr,...`. Reordenamos en cliente
+    // respetando el orden explícito de la lista `languages`: primero
+    // todos los `es`, luego todos los `en`, etc. Dentro de cada idioma
+    // se conserva el orden por descargas devuelto por el servidor.
+    if !languages.is_empty() {
+        let order: Vec<&str> = languages.split(',').map(str::trim).collect();
+        let rank = |lang: &str| -> usize {
+            order
+                .iter()
+                .position(|l| l.eq_ignore_ascii_case(lang))
+                .unwrap_or(usize::MAX)
+        };
+        subs.sort_by_key(|s| rank(&s.language));
+    }
+
+    Ok(subs)
 }
 
 /// Pide a OpenSubtitles el link de descarga temporal (`POST /download`) y
