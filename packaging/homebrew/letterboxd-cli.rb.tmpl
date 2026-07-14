@@ -25,12 +25,10 @@ class LetterboxdCli < Formula
     end
   end
 
-  # VLC es requerido para la funcionalidad de streaming BitTorrent (`s`
-  # en la TUI). En macOS se instala como cask; en Linux como formula
-  # normal.
-  on_macos do
-    depends_on cask: "vlc"
-  end
+  # VLC en Linux existe como fórmula normal y se puede declarar dep dura.
+  # En macOS VLC solo está disponible como cask (GUI app), y Homebrew ya
+  # no permite que una fórmula dependa de un cask. Se documenta en caveats
+  # como paso manual.
   on_linux do
     depends_on "vlc"
   end
@@ -43,8 +41,11 @@ class LetterboxdCli < Formula
     <<~EOS
       La primera vez que abras la TUI, se te pedirá login de Letterboxd.
       Las credenciales de la app ya vienen bakeadas — no tienes que
-      configurar nada más. VLC se instaló automáticamente como
-      dependencia para el streaming.
+      configurar nada más.
+
+      Para el streaming BitTorrent hace falta VLC. En macOS instálalo
+      con:
+        brew install --cask vlc
     EOS
   end
 

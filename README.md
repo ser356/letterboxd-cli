@@ -26,15 +26,23 @@ Recomendado: **usa un gestor de paquetes**. Instala el CLI, sus dependencias
 
 ```bash
 brew tap ser356/tap
+brew trust ser356/tap
 brew install letterboxd-cli
+brew install --cask vlc
 ```
 
-Instala también VLC como dependencia (~150 MB). Actualización:
-`brew upgrade letterboxd-cli`.
+Actualización: `brew upgrade letterboxd-cli`.
 
-> Solo Apple Silicon (M1+). Los Macs Intel deben usar la vía "compilar desde
-> código" más abajo — los runners `macos-13` de GitHub Actions están
-> deprecated y no publicamos binario x86_64.
+> `brew trust` es un paso obligatorio desde Homebrew 4.5+ para taps de
+> terceros — solo hay que hacerlo una vez por tap.
+>
+> En Linux VLC se instala automáticamente como dependencia. En macOS hay
+> que instalarlo aparte con `brew install --cask vlc` porque Homebrew ya
+> no permite que una fórmula dependa de un cask.
+>
+> Solo Apple Silicon (M1+). Los Macs Intel deben usar la vía "compilar
+> desde código" más abajo — los runners `macos-13` de GitHub Actions
+> están deprecated y no publicamos binario x86_64.
 
 ### Windows · Scoop ⭐️
 
