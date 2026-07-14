@@ -1,339 +1,268 @@
 # videodrome
 
-CLI en Rust que genera recomendaciones de películas a partir de tu historial, watchlist y ratings en Letterboxd, cruzando con la API de TMDB. Incluye salida de texto/JSON y una interfaz interactiva de terminal (TUI).
+Recomendaciones basadas en tu historial de Letterboxd, búsqueda de
+torrents en varios providers y streaming BitTorrent integrado en VLC.
+
+App de escritorio (Tauri + React) y CLI/TUI en el **mismo binario**:
+doble click abre la GUI, subcomandos por terminal ejecutan la CLI.
 
 ![demo](resources/demo.gif)
 
 ---
 
-## Requisitos
-
-- **VLC** para la funcionalidad de streaming BitTorrent (`s` en la TUI). Se instala
-  automáticamente si usas alguno de los gestores de paquetes recomendados abajo.
-
-Para compilar desde código además:
-- Rust 1.75+ (`rustup` recomendado)
-
----
-
 ## Instalación
 
-Recomendado: **usa un gestor de paquetes**. Los tres compilan desde
-código en tu máquina, así que:
+Los paquetes de macOS y Windows traen el binario **prebuilt** (~30 s) y
+crean:
 
-- El binario resultante nunca dispara Gatekeeper (macOS) ni SmartScreen
-  (Windows) porque no lleva la marca "descargado de internet".
-- Funciona en cualquier arquitectura (arm64/x86_64 mac, x86_64 windows,
-  todas las distros Linux) sin publicar binarios prebuilt para cada una.
+- Entrada en Launchpad / Menú Inicio (GUI).
+- Symlink `videodrome` en el `PATH` (CLI/TUI).
 
-Contrapartida: la instalación tarda **2–4 minutos** por compilar.
+Linux por ahora es CLI-only (sin bundle GUI).
 
-### macOS · Homebrew ⭐️
+### macOS · Homebrew Cask
 
 ```bash
-brew tap ser356/tap
-brew trust ser356/tap
-brew install videodrome
-brew install --cask vlc
+brew tap ser356/cask https://github.com/ser356/homebrew-cask
+brew install --cask videodrome
 ```
 
-Actualización: `brew upgrade videodrome`.
+VLC entra automáticamente como dependencia. La app **no está firmada
+por Apple**, así que la primera vez macOS la bloquea. Para desbloquear:
 
-> `brew trust` es un paso obligatorio desde Homebrew 4.5+ para taps de
-> terceros — solo hay que hacerlo una vez por tap.
->
-> VLC se instala aparte porque Homebrew ya no permite que una fórmula
-> dependa de un cask.
->
-> `brew install` compilará el CLI en local (~2–4 min); rust se instala
-> automáticamente como build-dependency si no lo tienes.
-
-### Windows · Scoop ⭐️
-
-**Una línea en PowerShell** (no admin):
-
-```powershell
-irm https://ser356.github.io/videodrome/install.ps1 | iex
+```bash
+xattr -cr /Applications/Videodrome.app
 ```
 
-Instala Scoop (si no lo tienes), añade los buckets necesarios, compila
-videodrome desde código en tu máquina y trae VLC + rustup como
-dependencias. ~5-10 min la primera vez. Actualización: `scoop update
-videodrome`.
+Alternativa: Ajustes del Sistema → Privacidad y seguridad → "Abrir de
+todas formas" tras el primer intento.
 
-Si ya tienes Scoop y prefieres el flujo manual:
+Actualizar: `brew upgrade --cask videodrome`.
+
+### Windows · Scoop (one-liner)
+
+En PowerShell **no admin**:
 
 ```powershell
-scoop bucket add main
+irm https://ser356.github.io/letterboxd-cli/install.ps1 | iex
+```
+
+Instala Scoop si falta, añade los buckets `extras` (VLC) y `ser356`, y
+descarga el binario prebuilt.
+
+Flujo manual si ya tienes Scoop:
+
+```powershell
 scoop bucket add extras
 scoop bucket add ser356 https://github.com/ser356/scoop-bucket
 scoop install ser356/videodrome
 ```
 
-### Linux ⭐️
+Actualizar: `scoop update videodrome`.
 
-Compila desde código con `cargo` (rustup suele venir preinstalado en
-distros de desarrollo). Instala VLC con tu gestor nativo:
+### Linux · tarball CLI
 
 ```bash
-cargo install --git https://github.com/ser356/videodrome
-sudo apt install vlc
+curl -sL https://github.com/ser356/letterboxd-cli/releases/latest/download/videodrome-v0.2.0-linux-x86_64.tar.gz | tar -xz
+sudo mv videodrome /usr/local/bin/
+sudo apt install vlc  # o el gestor que uses
 ```
 
-**NixOS / Nix**: si usas Nix hay un flake preparado:
+### Compilar desde código
+
+CLI-only (sin GUI, no requiere Node/webkit):
 
 ```bash
-nix profile install github:ser356/videodrome
-```
-
-Compila desde código de forma reproducible y trae VLC en el `PATH` del
-binario automáticamente.
-
-### Alternativa — Binarios prebuilt (releases)
-
-Si no quieres esperar a la compilación local, descarga el archivo de tu
-plataforma desde [Releases](https://github.com/ser356/videodrome/releases):
-
-- `videodrome-macos-arm64.tar.gz`
-- `videodrome-linux-x86_64.tar.gz`
-- `videodrome-windows-x86_64.zip`
-
-Descomprime, mueve el binario a algún directorio del `PATH`, e instala VLC
-por tu cuenta. En macOS puede saltar Gatekeeper la primera vez — quítale la
-cuarentena con:
-
-```bash
-xattr -d com.apple.quarantine videodrome
-```
-
-### Compilar en clon local
-
-```bash
-git clone https://github.com/ser356/videodrome
-cd videodrome
+git clone https://github.com/ser356/letterboxd-cli
+cd letterboxd-cli
 cargo install --path .
 ```
 
-El binario queda en `~/.cargo/bin/videodrome`, que ya está en el `PATH`
-si tienes Rust instalado con `rustup`. Instala VLC por tu cuenta si
-quieres usar streaming.
+Con GUI (necesita Node 20+ y libwebkit2gtk en Linux):
+
+```bash
+cd ui && npm ci && npm run build && cd ..
+cargo tauri build --features gui
+```
+
+---
+
+## Uso
+
+### GUI
+
+Doble click en Launchpad / Menú Inicio, o desde terminal sin args:
+
+```bash
+videodrome
+```
+
+La primera vez te pide login de Letterboxd. Todo lo demás (TMDB,
+OpenSubtitles) va bakeado en el binario.
+
+### CLI / TUI
+
+Con cualquier subcomando cae al modo terminal (mismo binario):
+
+```bash
+videodrome recommend --count 20 --min-rating 3.5
+videodrome torrents "the green mile" --year 1999
+videodrome tui                       # TUI ratatui
+videodrome keychain import           # solo macOS
+```
+
+#### `recommend`
+
+Genera recomendaciones a partir de tus películas mejor valoradas.
+
+| Opción | Descripción | Por defecto |
+|---|---|---|
+| `-c, --count <N>` | Número de recomendaciones | `10` |
+| `-m, --min-rating <R>` | Rating mínimo propio para usar como semilla (0.5–5.0) | `4.0` |
+| `--json` | Salida JSON en stdout (útil para scripting) | `false` |
+
+Las películas ya vistas o en watchlist se excluyen automáticamente. El
+ranking es `frecuencia × rating_LB` (cuántas semillas la recomiendan,
+ponderado por rating de la comunidad Letterboxd).
+
+Ejemplo JSON:
+
+```bash
+videodrome recommend --json | jq '.[].movie.title'
+```
+
+#### `torrents`
+
+Busca torrents para una película en varios providers a la vez, dedupea
+por infohash y ordena por `seeders × calidad`.
+
+```bash
+videodrome torrents "dune" --year 2021 --min-seeders 20 -n 15
+videodrome torrents --imdb tt0120689     # resuelve título vía TMDB
+```
+
+| Opción | Descripción | Por defecto |
+|---|---|---|
+| `<TITLE>` | Título (obligatorio salvo `--imdb`) | — |
+| `--imdb <ID>` | IMDb ID (con o sin `tt`) | — |
+| `--year <YYYY>` | Año (desambigua remakes) | — |
+| `--min-seeders <N>` | Filtro mínimo de seeders | `3` |
+| `-n, --limit <N>` | Número máximo de resultados | `20` |
+| `--json` | Salida JSON | `false` |
+
+Providers activos por defecto:
+
+- **YTS** (`yts.mx`) — solo cine, JSON público.
+- **Knaben** (`api.knaben.org`) — agregador 1337x, TPB, TorrentGalaxy,
+  YTS, Nyaa, RuTracker…
+- **Torznab** — opt-in. Se activa si defines `TORZNAB_URL` +
+  `TORZNAB_APIKEY` (Jackett / Prowlarr).
+
+#### `tui`
+
+Interfaz interactiva con hotkeys tipo vim.
+
+| Tecla | Acción |
+|---|---|
+| `↑`/`↓` o `j`/`k` | Mover selección |
+| `Enter` | Detalle (o abrir magnet en vista torrents) |
+| `t` | Buscar torrents para la película seleccionada |
+| `s` | **Stream en VLC** (torrent seleccionado) |
+| `x` | Buscar subtítulos (OpenSubtitles) |
+| `r` | Recargar recomendaciones con parámetros actuales |
+| `+` / `-` | Rating mínimo ± 0.5 |
+| `[` / `]` | Count ± 5 |
+| `b` / `Esc` | Volver |
+| `q` | Salir |
+
+Al cambiar `count` o `min_rating` con las teclas hay que pulsar `r`
+para recargar — la barra de estado avisa si los parámetros mostrados
+están desactualizados.
+
+Streaming: `s` arranca `librqbit` en un tempdir, sirve el fichero más
+grande vía HTTP local (soporte `Range`) y abre VLC apuntando a esa URL.
+Descarga secuencial priorizada por el player. Al salir de la TUI se
+cancela y borra todo el temporal.
+
+#### `keychain` (solo macOS)
+
+```bash
+videodrome keychain import   # lee .env / entorno y guarda en Keychain
+videodrome keychain clear    # borra las credenciales del Keychain
+```
+
+Ver la sección [Configuración](#configuración) abajo.
 
 ---
 
 ## Configuración
 
-La fuente de credenciales depende del sistema operativo:
+Credenciales de app (Letterboxd client_id/secret, TMDB bearer,
+OpenSubtitles API key) van **bakeadas** en los binarios oficiales — no
+tienes que configurarlas.
 
-- **macOS: Keychain, sin fallback a `.env`.** Poblar el Keychain con `videodrome keychain import` (ver más abajo). Si una credencial no está en el Keychain, el CLI aborta con un mensaje claro.
-- **Linux / Windows:** variables de entorno o `.env`.
+Solo necesitas tu **refresh_token** y **username** de Letterboxd, que
+la GUI captura por ti en el login. Si prefieres el flujo `.env`:
 
-### `.env` (Linux/Windows, o macOS solo para importar)
+### `.env` (Linux/Windows)
 
 ```bash
 mkdir -p ~/.config/videodrome
 ```
 
 ```env
-LETTERBOXD_CLIENT_ID=<tu_client_id>
-LETTERBOXD_CLIENT_SECRET=<tu_client_secret>
 LETTERBOXD_REFRESH_TOKEN=<tu_refresh_token>
 LETTERBOXD_USERNAME=<tu_username>
-TMDB_BEARER_TOKEN=<tu_tmdb_bearer_token>
 ```
 
-Se busca primero `~/.config/videodrome/.env`, y como fallback `.env` en el directorio actual.
+Búsqueda: primero `~/.config/videodrome/.env`, luego `.env` en el CWD.
 
-### Credenciales en el Keychain de macOS
+### Keychain (macOS)
 
-En macOS todas las credenciales viven en el Keychain, incluidas `LETTERBOXD_USERNAME` y
-`TMDB_BEARER_TOKEN`. Flujo típico:
+En macOS las credenciales viven en el Keychain. La GUI las guarda
+automáticamente tras el login. Import manual desde `.env`:
 
 ```bash
-# 1. Crea un .env temporal con las variables que quieras importar
-#    (basta con las que falten; import es tolerante)
-vim ~/.config/videodrome/.env
-
-# 2. Vuelca al Keychain
-videodrome keychain import
-
-# 3. (Opcional) borra el .env — las credenciales viven ya en el Keychain
-rm ~/.config/videodrome/.env
-
-# Para eliminarlas del Keychain más adelante:
-videodrome keychain clear
+vim ~/.config/videodrome/.env       # variables que quieras importar
+videodrome keychain import          # vuelca al Keychain
+rm ~/.config/videodrome/.env        # opcional: limpia el .env
 ```
 
-En el Keychain aparecen como items de contraseña genérica con `Cuenta = videodrome` y
-`Ubicación = letterboxd-<credencial>` (`videodromeent-id`, `videodromeent-secret`,
-`letterboxd-refresh-token`, `letterboxd-username`, `letterboxd-tmdb-bearer-token`).
+Los items aparecen en el Keychain con `Cuenta = videodrome` y
+`Ubicación = letterboxd-<credencial>`.
 
-> **Nota:** esto usa el Keychain local de ese Mac (login keychain), no el Keychain de iCloud. Un
-> item de Keychain solo se sincroniza por iCloud si se marca explícitamente como
-> `kSecAttrSynchronizable`, y eso requiere que el binario esté firmado con un perfil de
-> aprovisionamiento de Apple — algo que un CLI sin firmar (`cargo install`) no tiene. Si usas
-> `videodrome` en varios Macs, hay que ejecutar `keychain import` en cada uno.
->
-> Este comando solo funciona compilado para macOS; en Linux/Windows devuelve un error explicando
-> que el Keychain no está disponible.
-
----
-
-## Uso
-
-```
-videodrome [COMANDO] [OPCIONES]
-```
-
-Si se omite el comando, arranca la **TUI** con los valores por defecto
-(`count=10`, `min_rating=4.0`). Es decir, `videodrome` ≡ `videodrome tui`.
-
-### recommend
-
-Genera recomendaciones basadas en las películas que mejor has valorado.
-
-```bash
-videodrome recommend
-```
-
-Opciones:
-
-| Opción | Descripción | Por defecto |
-|---|---|---|
-| `-c, --count <N>` | Número de recomendaciones | `10` |
-| `-m, --min-rating <R>` | Rating mínimo propio para usar una película como semilla (escala 0.5–5.0) | `4.0` |
-| `--json` | Imprime las recomendaciones como JSON en stdout (útil para scripting) | `false` |
-
-Las películas que ya están en tu watchlist se excluyen automáticamente, igual que las que ya has visto.
-
-Ejemplos:
-
-```bash
-# Top 10 con la config por defecto
-videodrome recommend
-
-# Top 20 incluyendo películas con rating >= 3.5
-videodrome recommend --count 20 --min-rating 3.5
-
-# Salida JSON para scripting
-videodrome recommend --json | jq '.[].movie.title'
-```
-
-Salida de ejemplo:
-
-```
-  Recomendaciones para sekitoguapo
-
-   1.  La milla verde                             ★ 4.29
-   2.  Terminator                                 ★ 3.88
-   3.  Upgrade (Ilimitado)                        ★ 3.65
-   ...
-```
-
-El rating mostrado es el de la comunidad de Letterboxd (escala 0.5–5.0). El ranking se calcula como `frecuencia × rating_LB`: cuántas de tus películas semilla recomiendan esa película, ponderado por su valoración en Letterboxd.
-
-### tui
-
-Abre una interfaz interactiva de terminal que carga las recomendaciones en segundo plano.
-
-```bash
-videodrome tui
-videodrome tui --count 20 --min-rating 3.5
-```
-
-Atajos de teclado (vista de recomendaciones):
-
-| Tecla | Acción |
-|---|---|
-| `↑`/`↓` o `j`/`k` | Mover selección |
-| `t` | Buscar torrents para la película seleccionada |
-| `r` | (Re)cargar recomendaciones con los parámetros actuales |
-| `+`/`-` | Subir/bajar el rating mínimo en 0.5 |
-| `[`/`]` | Bajar/subir el número de resultados en 5 |
-| `q` / `Esc` | Salir |
-
-Atajos en la vista de torrents:
-
-| Tecla | Acción |
-|---|---|
-| `↑`/`↓` o `j`/`k` | Mover selección |
-| `Enter` | Abrir el magnet con el handler del sistema (Transmission, qBittorrent…) |
-| `s` | **Stream en VLC**: arranca un cliente BitTorrent embebido (librqbit), descarga secuencialmente el fichero más grande y lo sirve por HTTP local; abre VLC apuntando a esa URL para previsualizarlo mientras baja. |
-| `b` / `Esc` | Volver a la lista de recomendaciones |
-| `q` | Salir (para el streaming y borra el temporal) |
-
-Al cambiar `count` o `min_rating` con las teclas, hay que pulsar `r` para recargar — la barra de estado avisa cuando los parámetros mostrados están desactualizados.
-
-### torrents
-
-Busca torrents para una película concreta en varios providers a la vez.
-
-```bash
-videodrome torrents "the green mile" --year 1999
-videodrome torrents --imdb tt0120689     # resuelve título vía TMDB
-videodrome torrents "dune" --min-seeders 20 -n 15 --json
-```
-
-Opciones:
-
-| Opción | Descripción | Por defecto |
-|---|---|---|
-| `<TITLE>` (posicional) | Título (obligatorio salvo que se pase `--imdb`) | — |
-| `--imdb <ID>` | IMDb ID (con o sin `tt`). Si no se pasa título, se resuelve vía TMDB | — |
-| `--year <YYYY>` | Año (ayuda a desambiguar remakes) | — |
-| `--tmdb-id <N>` | TMDB ID (informativo por ahora) | — |
-| `--min-seeders <N>` | Filtro mínimo de seeders | `3` |
-| `-n, --limit <N>` | Número máximo de resultados | `20` |
-| `--json` | Salida JSON en lugar de texto | `false` |
-
-**Providers** (activados por defecto):
-
-- **YTS** (`yts.mx`) — API JSON pública, solo cine. Puede fallar si tu red bloquea el dominio.
-- **Knaben** (`api.knaben.org`) — agregador que consulta 1337x, TPB, TorrentGalaxy (cuando funciona), YTS, Nyaa, RuTracker, etc. Es el que da más cobertura.
-- **Torznab** (Jackett/Prowlarr) — **opt-in**: se activa si defines las variables:
-
-  ```bash
-  export TORZNAB_URL="http://localhost:9117/api/v2.0/indexers/all/results/torznab/api"
-  export TORZNAB_APIKEY="tu_apikey_de_jackett"
-  ```
-
-  Con eso puedes usar cualquier indexer que tengas configurado en tu Jackett o Prowlarr.
-
-Los resultados se dedupean por infohash y se ordenan por `seeders × calidad`
-(2160p pesa más que 1080p, etc.). Cada torrent muestra tamaño, seeders,
-leechers, calidad detectada, provider y magnet completo.
-
-### keychain (solo macOS)
-
-Gestiona las credenciales guardadas en el Keychain de macOS. Ver [Credenciales en el Keychain de
-macOS](#credenciales-en-el-keychain-de-macos) arriba.
-
-```bash
-videodrome keychain import
-videodrome keychain clear
-```
+Keychain **local** (no iCloud): en un Mac nuevo hay que volver a
+importar. La sync iCloud requiere firma con perfil Apple, que un CLI
+sin firmar no tiene.
 
 ---
 
 ## Caché
 
-Para evitar llamadas repetidas a la API:
+En `~/.config/videodrome/`:
 
-- Token OAuth: `~/.config/videodrome/token.json` — se renueva automáticamente al expirar
-- Historial de Letterboxd: `~/.config/videodrome/log_entries.json` — TTL 1 hora
-- Watchlist de Letterboxd: `~/.config/videodrome/watchlist.json` — TTL 1 hora
-- Recomendaciones de TMDB por película: `~/.config/videodrome/tmdb_recs_cache.json` — TTL 24 horas
+| Fichero | TTL |
+|---|---|
+| `token.json` | renovación automática al expirar |
+| `log_entries.json` | 1 h |
+| `watchlist.json` | 1 h |
+| `tmdb_recs_cache.json` | 24 h |
 
 ---
 
-## Compilar sin instalar
+## Desarrollo
 
 ```bash
-cargo build --release
-./target/release/videodrome recommend
+# CLI/TUI (sin GUI)
+cargo run -- recommend --count 5
+
+# GUI (Tauri dev, hot-reload React + backend)
+cd ui && npm ci && cd ..
+cargo tauri dev --features gui
 ```
 
----
+Feature flag `gui` es opt-in (default `[]`) para que `cargo build`
+compile CLI-only sin webkit ni `ui/dist`. El CI valida el CLI en cada
+PR; la GUI se valida en `release.yml`.
 
-## Estado del CLAUDE.md
-
-El fichero [CLAUDE.md](CLAUDE.md) contiene la especificación técnica del proyecto y sirve como referencia para el desarrollo.
+Ver [CLAUDE.md](CLAUDE.md) para arquitectura y decisiones de diseño.
