@@ -78,8 +78,14 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
+      # Descarga el binario prebuilt de tauri-cli en ~10 s en vez de
+      # compilarlo desde fuente con `cargo install` (~8 min en Windows,
+      # ~3 min en macOS). taiki-e/install-action mantiene una lista de
+      # tools comunes con releases oficiales.
       - name: Instalar tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
 
       - name: Build frontend
         working-directory: ui
@@ -148,8 +154,11 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
+      # Prebuilt binario, ver comentario en el job de macOS.
       - name: Instalar tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
 
       - name: Build frontend
         working-directory: ui
