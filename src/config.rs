@@ -91,9 +91,9 @@ impl Config {
         let client_id = resolve("LETTERBOXD_CLIENT_ID", keychain::CLIENT_ID)
             .or_else(|| BAKED_CLIENT_ID.map(|s| s.to_string()))
             .context(
-                "LETTERBOXD_CLIENT_ID no está definida. Recompila con \
-                 `LB_APP_CLIENT_ID=xxx cargo install --path .`, o define \
-                 LETTERBOXD_CLIENT_ID en el entorno.",
+                "LETTERBOXD_CLIENT_ID no est\u{e1} definida y el binario no lleva \
+                 credenciales bakeadas. Define LETTERBOXD_CLIENT_ID en el \
+                 entorno o en `~/.config/videodrome/.env`.",
             )?;
         let client_secret = resolve("LETTERBOXD_CLIENT_SECRET", keychain::CLIENT_SECRET)
             .or_else(|| BAKED_CLIENT_SECRET.map(|s| s.to_string()))
@@ -113,9 +113,9 @@ impl Config {
         let tmdb_bearer_token = resolve("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN)
             .or_else(|| BAKED_TMDB_BEARER.map(|s| s.to_string()))
             .context(
-                "TMDB_BEARER_TOKEN no está definida. Recompila con \
-                 `LB_APP_TMDB_BEARER=xxx cargo install --path .`, o define \
-                 TMDB_BEARER_TOKEN en el entorno.",
+                "TMDB_BEARER_TOKEN no est\u{e1} definida y el binario no lleva \
+                 credenciales bakeadas. Define TMDB_BEARER_TOKEN en el \
+                 entorno o en `~/.config/videodrome/.env`.",
             )?;
 
         Ok(Self {

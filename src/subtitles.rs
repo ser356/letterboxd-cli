@@ -5,9 +5,9 @@
 //! Doc: <https://opensubtitles.stoplight.io/docs/opensubtitles-api>
 //!
 //! Necesita un API key gratuito (con quota: 5 req/s, ~200 descargas/día
-//! anónimas). Se bakea en el binario al compilar con
-//! `LB_APP_OS_API_KEY=xxx cargo install --path .`, o se puede definir la
-//! env var `OPENSUBTITLES_API_KEY` en runtime.
+//! anónimas). En builds distribuidos va bakeada en el binario; para
+//! builds locales / desarrolladores se puede definir la env var
+//! `OPENSUBTITLES_API_KEY` en runtime.
 //!
 //! El match "edición correcta" (BluRay ↔ BluRay, WEB-DL ↔ WEB-DL...) se
 //! consigue pasando el título del torrent como `query`: OpenSubtitles

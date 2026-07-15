@@ -28,6 +28,11 @@ fn tmdb_id_from_film(film: &Film) -> Option<u64> {
 
 /// Películas a excluir de las recomendaciones (ya vistas o en watchlist) y
 /// películas semilla (vistas con rating >= min_rating).
+///
+/// Las semillas se dedupean por TMDB id: en Letterboxd cada visionado es
+/// un log entry distinto, así que sin dedupe un rewatch triplicaba las
+/// llamadas a TMDB y sesgaba `freq` (una peli vecina de un rewatch
+/// contaría 3 veces).
 fn compute_seen_and_seeds(
     entries: &[LogEntry],
     watchlist: &[Film],
@@ -39,11 +44,19 @@ fn compute_seen_and_seeds(
         .collect();
     seen.extend(watchlist.iter().filter_map(tmdb_id_from_film));
 
-    let seeds: Vec<u64> = entries
-        .iter()
-        .filter(|e| e.rating.map(|r| r >= min_rating).unwrap_or(false))
-        .filter_map(|e| tmdb_id_from_film(&e.film))
-        .collect();
+    let mut seed_set: HashSet<u64> = HashSet::new();
+    let mut seeds: Vec<u64> = Vec::new();
+    for e in entries {
+        if !e.rating.map(|r| r >= min_rating).unwrap_or(false) {
+            continue;
+        }
+        let Some(id) = tmdb_id_from_film(&e.film) else {
+            continue;
+        };
+        if seed_set.insert(id) {
+            seeds.push(id);
+        }
+    }
 
     (seen, seeds)
 }

@@ -113,7 +113,7 @@ fn load_cache<T: DeserializeOwned>(file: &str) -> Option<Vec<T>> {
     let path = cache_path(file).ok()?;
     let data = std::fs::read_to_string(path).ok()?;
     let cached: Cached<T> = serde_json::from_str(&data).ok()?;
-    (now_unix() - cached.timestamp < CACHE_TTL_SECS).then_some(cached.items)
+    (now_unix().saturating_sub(cached.timestamp) < CACHE_TTL_SECS).then_some(cached.items)
 }
 
 fn save_cache<T: Serialize>(file: &str, items: &[T]) {
@@ -180,7 +180,10 @@ impl<'a> LetterboxdClient<'a> {
 
         loop {
             let url = match &cursor {
-                Some(c) => format!("{base}&cursor={c}"),
+                // El cursor viene opaco desde la API pero puede llevar
+                // caracteres reservados en URL (`+`, `=`, `/`); hay que
+                // encodearlo antes de meterlo al querystring.
+                Some(c) => format!("{base}&cursor={}", urlencoding::encode(c)),
                 None => base.to_string(),
             };
 

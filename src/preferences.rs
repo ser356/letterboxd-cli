@@ -13,23 +13,44 @@ use std::path::PathBuf;
 
 const PREFERENCES_FILE: &str = "preferences.json";
 
+/// Preferencias del usuario. Cada campo lleva `#[serde(default)]` para
+/// que añadir uno nuevo NO invalide los `preferences.json` existentes:
+/// los campos ausentes se rellenan con el default individual del campo
+/// (`default_min_rating` → 4.0, etc.), no con `Preferences::default()`
+/// entera. Sin esto, el primer save después de un update borraba las
+/// preferencias del usuario sin avisar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preferences {
     /// Rating mínimo por defecto en la vista Recs (0.5 – 5.0).
+    #[serde(default = "default_min_rating")]
     pub default_min_rating: f32,
-    /// Número de recomendaciones por defecto.
+    /// Número de recomendaciones por defecto. Alineado con la CLI
+    /// (`videodrome recommend` usa 10) — la GUI puede subirlo si el user
+    /// lo cambia en Ajustes.
+    #[serde(default = "default_count")]
     pub default_count: usize,
     /// Idiomas de subtítulos separados por coma (ISO 639-1). Se pasa a
     /// OpenSubtitles como parámetro `languages`.
+    #[serde(default = "default_subtitle_languages")]
     pub subtitle_languages: String,
+}
+
+fn default_min_rating() -> f32 {
+    4.0
+}
+fn default_count() -> usize {
+    10
+}
+fn default_subtitle_languages() -> String {
+    crate::subtitles::DEFAULT_LANGUAGES.to_string()
 }
 
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            default_min_rating: 4.0,
-            default_count: 20,
-            subtitle_languages: crate::subtitles::DEFAULT_LANGUAGES.to_string(),
+            default_min_rating: default_min_rating(),
+            default_count: default_count(),
+            subtitle_languages: default_subtitle_languages(),
         }
     }
 }

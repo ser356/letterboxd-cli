@@ -86,12 +86,16 @@ impl TorrentProvider for Torznab {
             None => ("search", String::new()),
         };
 
+        // Política unificada con Knaben/Apibay: el año NUNCA va en la
+        // query — los grupos etiquetan el año del estreno original y no
+        // el USA que TMDB reporta, así "Funny Games 2008" devuelve
+        // basura. El indexador de detrás filtra por título + imdbid.
         let mut url = format!(
             "{}?t={}&apikey={}&q={}",
             self.url.trim_end_matches('?'),
             t_param,
             urlencoding::encode(&self.apikey),
-            urlencoding::encode(&q.keywords()),
+            urlencoding::encode(q.title.trim()),
         );
         url.push_str(&extra);
 

@@ -1,6 +1,6 @@
 [package]
 name = "videodrome"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [[bin]]
@@ -39,8 +39,6 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 librqbit = "8"
 tempfile = "3"
 axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tauri = { version = "2", features = [], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }

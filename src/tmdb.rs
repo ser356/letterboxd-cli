@@ -123,7 +123,7 @@ impl<'a> TmdbClient<'a> {
     /// para no repetir la misma consulta en ejecuciones sucesivas.
     pub async fn get_recommendations(&self, tmdb_id: u64) -> Result<Vec<TmdbMovie>> {
         if let Some(cached) = self.cache.lock().unwrap().get(&tmdb_id) {
-            if now_unix() - cached.timestamp < RECS_CACHE_TTL_SECS {
+            if now_unix().saturating_sub(cached.timestamp) < RECS_CACHE_TTL_SECS {
                 return Ok(cached.movies.clone());
             }
         }
@@ -138,9 +138,21 @@ impl<'a> TmdbClient<'a> {
             .await
             .with_context(|| format!("Error al obtener recomendaciones para tmdb_id={tmdb_id}"))?;
 
-        if !resp.status().is_success() {
-            // Película no encontrada u otro error: devolver lista vacía silenciosamente
-            return Ok(vec![]);
+        let status = resp.status();
+        if !status.is_success() {
+            // 404 (película no encontrada) es benigno — la ignoramos como
+            // fuente. 401 / 429 / 5xx en cambio son señales de que la
+            // config está rota o el rate-limit ha saltado: hay que
+            // propagar para que el user lo vea, no devolver [] silencioso
+            // que se lee como "no hay recomendaciones".
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(vec![]);
+            }
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "TMDB devolvi\u{f3} {status} para tmdb_id={tmdb_id}: {}",
+                body.chars().take(200).collect::<String>()
+            );
         }
 
         let body: RecommendationsResponse = resp

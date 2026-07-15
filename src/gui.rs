@@ -1,7 +1,8 @@
-//! GUI (Tauri) backend. Solo se compila con `--features gui` (activa por
-//! defecto). Reutiliza los módulos existentes (`auth`, `letterboxd`,
-//! `tmdb`, `recommend`, `torrents`, `stream`, `subtitles`, `credentials`)
-//! y los expone al frontend React como `#[tauri::command]`.
+//! GUI (Tauri) backend. Solo se compila con `--features gui` (opt-in;
+//! `default = []` en Cargo.toml — los builds CLI/TUI no lo tocan).
+//! Reutiliza los módulos existentes (`auth`, `letterboxd`, `tmdb`,
+//! `recommend`, `torrents`, `stream`, `subtitles`, `credentials`) y los
+//! expone al frontend React como `#[tauri::command]`.
 //!
 //! Comandos expuestos, agrupados por vista:
 //! - Sesión: `has_session`, `login`
@@ -16,6 +17,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -31,7 +33,9 @@ use crate::recommend::{build_recommendations, Recommendation};
 use crate::stream::{self, StreamHandle, StreamStats};
 use crate::subtitles::{self, Subtitle};
 use crate::tmdb::{MovieView, TmdbClient, TmdbMovie};
-use crate::torrents::{self, AudioHint, MovieQuery, Torrent};
+use crate::torrents::{
+    self, release_starts_with, split_trailing_year, AudioHint, MovieQuery, Torrent,
+};
 
 const SEARCH_CACHE_FILE: &str = "search_cache.json";
 const SEARCH_CACHE_TTL_SECS: u64 = 24 * 3600;
@@ -93,14 +97,19 @@ pub struct AppState {
     http: reqwest::Client,
     /// Streams activos indexados por id. La TUI solo tiene uno a la vez,
     /// aquí también, pero un `HashMap` permite polling limpio.
-    streams: Arc<Mutex<HashMap<u64, StreamHandle>>>,
+    streams: Arc<Mutex<HashMap<u64, ActiveStream>>>,
     next_stream_id: Arc<Mutex<u64>>,
-    /// Subs descargados para pasarlos a VLC (`--sub-file=…`) al lanzar el
-    /// stream. Indexado por `stream_id`.
-    pending_subs: Arc<Mutex<HashMap<u64, PathBuf>>>,
     /// Caché en memoria (y persistida) de `search_movies_tmdb`. Evita
     /// repetir el sondeo a providers cuando el user repite una búsqueda.
     search_cache: Arc<Mutex<HashMap<String, CachedSearch>>>,
+}
+
+/// Un stream vivo + el flag que se pone en `false` cuando VLC termina.
+struct ActiveStream {
+    handle: StreamHandle,
+    /// Flag compartido con la tarea que espera al proceso VLC. Cuando el
+    /// player muere se pone en `false` y `stream_stats` limpia el slot.
+    alive: Arc<AtomicBool>,
 }
 
 /// Progress no-op: la GUI no necesita ver las etapas por ahora.
@@ -120,7 +129,28 @@ async fn has_session(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn logout(state: State<'_, AppState>) -> Result<(), String> {
+    // Cierre "de verdad": borrar credenciales, el token de acceso
+    // cacheado (si no, get_access_token seguiría devolviéndolo hasta 1h
+    // después del logout) y los cachés de historial/watchlist (para que
+    // si otro usuario entra a continuación no vea las recomendaciones
+    // calculadas con datos del anterior).
     credentials::clear().map_err(|e| e.to_string())?;
+    auth::clear_cached_token().map_err(|e| e.to_string())?;
+
+    let dir = config_dir().map_err(|e| e.to_string())?;
+    for file in [
+        "log_entries.json",
+        "watchlist.json",
+        "tmdb_recs_cache.json",
+        SEARCH_CACHE_FILE,
+    ] {
+        let p = dir.join(file);
+        if p.exists() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+    state.search_cache.lock().await.clear();
+
     let mut cfg = state.config.lock().await;
     cfg.refresh_token = None;
     cfg.username = String::new();
@@ -221,7 +251,7 @@ async fn search_movies_tmdb(
     {
         let cache = state.search_cache.lock().await;
         if let Some(cached) = cache.get(&key) {
-            if now_unix() - cached.timestamp < SEARCH_CACHE_TTL_SECS {
+            if now_unix().saturating_sub(cached.timestamp) < SEARCH_CACHE_TTL_SECS {
                 return Ok(cached.hits.clone());
             }
         }
@@ -406,9 +436,13 @@ async fn search_torrents_by_tmdb(
                 original_language: original_language.clone(),
             };
             let raw = torrents::search_all(&state.http, &providers, &ru_q, 1, 40).await;
+            // Se comparte el helper `release_starts_with` con la TUI:
+            // lowercases y quita puntuación inicial, así matchea releases
+            // como `«Titulo» ...` o `[Titulo] ...` que con un
+            // `starts_with` case-sensitive se descartaban.
             list = raw
                 .into_iter()
-                .filter(|t| t.title.starts_with(&ru))
+                .filter(|t| release_starts_with(&t.title, &ru))
                 .collect();
         }
     }
@@ -455,21 +489,6 @@ async fn search_torrents_direct(
     })
 }
 
-fn split_trailing_year(s: &str) -> (String, Option<u16>) {
-    let trimmed = s.trim();
-    if trimmed.len() > 5 {
-        let (rest, tail) = trimmed.split_at(trimmed.len() - 5);
-        if let Some(year_str) = tail.strip_prefix(' ') {
-            if let Ok(y) = year_str.parse::<u16>() {
-                if (1888..=2100).contains(&y) {
-                    return (rest.trim_end().to_string(), Some(y));
-                }
-            }
-        }
-    }
-    (trimmed.to_string(), None)
-}
-
 #[tauri::command]
 fn open_magnet(magnet: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -494,6 +513,26 @@ struct StreamInfo {
 
 #[tauri::command]
 async fn start_stream(magnet: String, state: State<'_, AppState>) -> Result<StreamInfo, String> {
+    start_stream_inner(magnet, None, &state).await
+}
+
+/// Como `start_stream`, pero pasando explícitamente un path de subtítulo
+/// para VLC. Único camino usado por la GUI actual (el diálogo previo
+/// pregunta si cargar subs y ya descarga antes de arrancar).
+#[tauri::command]
+async fn start_stream_with_sub(
+    magnet: String,
+    sub_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<StreamInfo, String> {
+    start_stream_inner(magnet, sub_path.map(PathBuf::from), &state).await
+}
+
+async fn start_stream_inner(
+    magnet: String,
+    sub_path: Option<PathBuf>,
+    state: &State<'_, AppState>,
+) -> Result<StreamInfo, String> {
     let handle = stream::start(magnet).await.map_err(|e| e.to_string())?;
 
     let mut id_lock = state.next_stream_id.lock().await;
@@ -507,13 +546,15 @@ async fn start_stream(magnet: String, state: State<'_, AppState>) -> Result<Stre
         file_name: handle.file_name.clone(),
     };
 
-    // Si hay sub descargado apuntado a este id (esperado antes de arrancar
-    // stream), se pasa a VLC. Como el flujo es "arranca stream, después
-    // VLC", solo consumimos si ya está registrado con el mismo id.
-    let sub_path = state.pending_subs.lock().await.remove(&id);
-    let _alive = stream::open_in_vlc(&handle.url, sub_path.as_deref());
+    // Guardamos el AtomicBool de vida del player para que `stream_stats`
+    // pueda reflejar el estado real y limpiar el slot cuando VLC muere.
+    let alive = stream::open_in_vlc(&handle.url, sub_path.as_deref());
 
-    state.streams.lock().await.insert(id, handle);
+    state
+        .streams
+        .lock()
+        .await
+        .insert(id, ActiveStream { handle, alive });
     Ok(info)
 }
 
@@ -528,29 +569,37 @@ struct StreamStatsDto {
 
 #[tauri::command]
 async fn stream_stats(id: u64, state: State<'_, AppState>) -> Result<StreamStatsDto, String> {
-    let streams = state.streams.lock().await;
-    let handle = streams
+    let mut streams = state.streams.lock().await;
+    let active = streams
         .get(&id)
         .ok_or_else(|| format!("stream {id} no encontrado"))?;
+    let alive = active.alive.load(Ordering::Relaxed);
     let StreamStats {
         progress_bytes,
         total_bytes,
         live_peers,
         down_mbps,
-    } = handle.stats();
+    } = active.handle.stats();
+
+    // Si VLC murió, limpiamos el slot: así el frontend recibe un solo
+    // stats con `alive=false` y después deja de pollear. El Drop del
+    // handle apaga librqbit + libera el tempdir.
+    if !alive {
+        streams.remove(&id);
+    }
+
     Ok(StreamStatsDto {
         progress_bytes,
         total_bytes,
         live_peers,
         down_mbps,
-        alive: true,
+        alive,
     })
 }
 
 #[tauri::command]
 async fn stop_stream(id: u64, state: State<'_, AppState>) -> Result<(), String> {
     state.streams.lock().await.remove(&id);
-    state.pending_subs.lock().await.remove(&id);
     Ok(())
 }
 
@@ -574,52 +623,23 @@ async fn search_subtitles(
         .map_err(|e| e.to_string())
 }
 
-/// Descarga un subtítulo. Si `stream_id` viene, lo asocia a ese stream
-/// para que `start_stream` lo pase a VLC como `--sub-file`. Si no, el
-/// path devuelto puede pasarlo el frontend a la próxima llamada de
-/// `start_stream_with_sub`.
+/// Descarga un subtítulo y devuelve la ruta local. El frontend le pasa
+/// esta ruta a `start_stream_with_sub` para arrancar el stream con el
+/// `.srt` ya cargado en VLC.
 #[tauri::command]
-async fn download_subtitle(
-    sub: Subtitle,
-    stream_id: Option<u64>,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
+async fn download_subtitle(sub: Subtitle, state: State<'_, AppState>) -> Result<String, String> {
     let dest = std::env::temp_dir().join("videodrome-subs");
     let path = subtitles::download(&state.http, &sub, &dest)
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(sid) = stream_id {
-        state.pending_subs.lock().await.insert(sid, path.clone());
-    }
     Ok(path.display().to_string())
 }
 
-/// Como `start_stream`, pero pasando explícitamente un path de subtítulo
-/// para VLC. Útil cuando la GUI descarga el sub ANTES de decidir el id.
-#[tauri::command]
-async fn start_stream_with_sub(
-    magnet: String,
-    sub_path: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<StreamInfo, String> {
-    let handle = stream::start(magnet).await.map_err(|e| e.to_string())?;
-
-    let mut id_lock = state.next_stream_id.lock().await;
-    *id_lock += 1;
-    let id = *id_lock;
-    drop(id_lock);
-
-    let sub = sub_path.map(PathBuf::from);
-    let _alive = stream::open_in_vlc(&handle.url, sub.as_deref());
-
-    let info = StreamInfo {
-        id,
-        url: handle.url.clone(),
-        file_name: handle.file_name.clone(),
-    };
-    state.streams.lock().await.insert(id, handle);
-    Ok(info)
-}
+// Nota histórica: antes existía un mapa `pending_subs` que asociaba un
+// `stream_id` a una ruta de subtítulo pre-descargada; era código muerto
+// (el id se asignaba dentro de `start_stream`, así que el frontend
+// nunca podía registrarlo con el id correcto). El flujo actual es
+// exclusivamente `start_stream_with_sub(magnet, sub_path?)`.
 
 // ---------- Ajustes: caché + preferencias ----------
 
@@ -732,7 +752,6 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
         http,
         streams: Arc::new(Mutex::new(HashMap::new())),
         next_stream_id: Arc::new(Mutex::new(0)),
-        pending_subs: Arc::new(Mutex::new(HashMap::new())),
         search_cache: Arc::new(Mutex::new(load_search_cache())),
     };
 

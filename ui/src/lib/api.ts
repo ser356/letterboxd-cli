@@ -160,7 +160,7 @@ export const searchSubtitles = (
   })
 
 export const downloadSubtitle = (sub: Subtitle) =>
-  invoke<string>('download_subtitle', { sub, streamId: null })
+  invoke<string>('download_subtitle', { sub })
 
 // -------- Ajustes: caché + preferencias --------
 

@@ -117,7 +117,7 @@ const METADATA_TIMEOUT_SECS: u64 = 45;
 /// URL para el reproductor.
 pub async fn start(magnet: String) -> Result<StreamHandle> {
     let tempdir = tempfile::Builder::new()
-        .prefix("letterboxd-stream-")
+        .prefix("videodrome-stream-")
         .tempdir()
         .context("No se pudo crear directorio temporal")?;
 
@@ -235,9 +235,33 @@ async fn serve_video(
         .and_then(|v| v.to_str().ok())
         .and_then(parse_range);
 
+    // Rango vacío: fichero de tamaño cero — nada que servir.
+    if state.file_len == 0 {
+        return Err((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "Fichero vac\u{ed}o".to_string(),
+        ));
+    }
+
     let (start, end) = match range {
-        Some((s, Some(e))) => (s, e.min(state.file_len - 1)),
-        Some((s, None)) => (s, state.file_len - 1),
+        Some((Some(s), Some(e))) => {
+            // Rango con start y end explícitos. Rechaza `bytes=5-3`.
+            if e < s {
+                return Err((
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    format!("Rango malformado: {s}-{e}"),
+                ));
+            }
+            (s, e.min(state.file_len - 1))
+        }
+        Some((Some(s), None)) => (s, state.file_len - 1),
+        Some((None, Some(suffix))) => {
+            // Suffix range (`bytes=-500`): los últimos N bytes del fichero.
+            // Algunos players lo usan para leer el índice al final del MP4.
+            let n = suffix.min(state.file_len);
+            (state.file_len - n, state.file_len - 1)
+        }
+        Some((None, None)) => (0, state.file_len - 1),
         None => (0, state.file_len - 1),
     };
 
@@ -329,18 +353,30 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for LimitedRead<R> {
     }
 }
 
-/// Parsea `bytes=START-END` o `bytes=START-`. Solo soportamos un rango.
-fn parse_range(v: &str) -> Option<(u64, Option<u64>)> {
+/// Parsea `Range: bytes=START-END`, `bytes=START-` o `bytes=-SUFFIX`.
+/// Devuelve `(Option<start>, Option<end>)`: si `start` es `None` se
+/// trata como suffix range (los últimos N bytes). Solo se soporta UN
+/// rango — los multipart se rechazan por caller.
+fn parse_range(v: &str) -> Option<(Option<u64>, Option<u64>)> {
     let rest = v.strip_prefix("bytes=")?;
     let (start, end) = rest.split_once('-')?;
-    let start: u64 = start.trim().parse().ok()?;
+    let start = start.trim();
     let end = end.trim();
-    let end = if end.is_empty() {
+    let start_val: Option<u64> = if start.is_empty() {
+        None
+    } else {
+        Some(start.parse().ok()?)
+    };
+    let end_val: Option<u64> = if end.is_empty() {
         None
     } else {
         Some(end.parse().ok()?)
     };
-    Some((start, end))
+    // Al menos uno de los dos debe estar presente.
+    if start_val.is_none() && end_val.is_none() {
+        return None;
+    }
+    Some((start_val, end_val))
 }
 
 /// Abre la URL con VLC y devuelve un flag que se pone a `false` cuando el
@@ -376,19 +412,22 @@ pub fn open_in_vlc(
     let child_result: std::io::Result<tokio::process::Child> = {
         #[cfg(target_os = "macos")]
         {
-            let mut cmd = tokio::process::Command::new("open");
-            cmd.args(["-W", "-a", "VLC", "--args", url]);
-            if let Some(a) = sub_arg.as_deref() {
-                cmd.arg(a);
-            }
-            let vlc = cmd.spawn();
-            match vlc {
-                Ok(c) => Ok(c),
-                // Fallback: `open <url>` sin `-a VLC` — deja al SO elegir
-                // el reproductor por defecto. En ese caso perdemos la
-                // capacidad de pasar `--sub-file` (no todos los players lo
-                // soportan) — el user tendrá que cargar el sub a mano.
-                Err(_) => tokio::process::Command::new("open").arg(url).spawn(),
+            // `open` con -a spawnea el subproceso aunque VLC no esté
+            // instalado (el error viene después en tiempo de ejecución),
+            // así que el fallback Err(_) NUNCA se ejecutaba. Comprobamos
+            // la existencia primero con `mdfind` / rutas estándar.
+            if !macos_vlc_installed() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "VLC no est\u{e1} instalado",
+                ))
+            } else {
+                let mut cmd = tokio::process::Command::new("open");
+                cmd.args(["-W", "-a", "VLC", "--args", url]);
+                if let Some(a) = sub_arg.as_deref() {
+                    cmd.arg(a);
+                }
+                cmd.spawn()
             }
         }
         #[cfg(target_os = "linux")]
@@ -401,7 +440,10 @@ pub fn open_in_vlc(
             let vlc = cmd.spawn();
             match vlc {
                 Ok(c) => Ok(c),
-                Err(_) => tokio::process::Command::new("xdg-open").arg(url).spawn(),
+                // Sin VLC en Linux no podemos abrir un stream local
+                // (xdg-open sobre http://127.0.0.1:... abriría el
+                // navegador, no un reproductor — inútil para vídeo).
+                Err(e) => Err(e),
             }
         }
         #[cfg(target_os = "windows")]
@@ -432,4 +474,26 @@ pub fn open_in_vlc(
     }
 
     alive
+}
+
+/// Chequea si VLC.app está instalado en el Mac. Necesario porque
+/// `open -a VLC` spawnea el proceso `open` con éxito aunque VLC no
+/// exista — el error real solo aparece en tiempo de ejecución, cuando
+/// `open` ya devolvió Ok. Sin este check el `Err(_)` fallback nunca
+/// se disparaba.
+#[cfg(target_os = "macos")]
+fn macos_vlc_installed() -> bool {
+    use std::path::Path;
+    for path in ["/Applications/VLC.app", "/System/Applications/VLC.app"] {
+        if Path::new(path).exists() {
+            return true;
+        }
+    }
+    // Fallback por si el user tiene VLC en ~/Applications u otra ruta.
+    if let Some(home) = dirs::home_dir() {
+        if home.join("Applications/VLC.app").exists() {
+            return true;
+        }
+    }
+    false
 }

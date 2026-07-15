@@ -69,3 +69,14 @@ pub fn clear() -> Result<()> {
     }
     Ok(())
 }
+
+/// Actualiza sólo el `refresh_token` en el fichero de credenciales,
+/// preservando el `username` que ya hubiera guardado. Se usa cuando el
+/// endpoint de refresh de Letterboxd devuelve un token rotado — si no
+/// lo persistimos, el user acaba expulsado en cuanto caduque el ciclo
+/// del token actual (típicamente 1 h).
+pub fn update_refresh_token(new_token: &str) -> Result<()> {
+    let mut current = load();
+    current.refresh_token = Some(new_token.to_string());
+    save(&current)
+}

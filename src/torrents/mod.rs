@@ -1,8 +1,8 @@
 //! Búsqueda de torrents para películas.
 //!
 //! Define un trait `TorrentProvider` con implementaciones para varias fuentes
-//! (YTS, Knaben, Torznab). `search_all` las consulta en paralelo, dedupe por
-//! infohash y ordena por seeders × calidad.
+//! (YTS, Apibay, Knaben, Torznab). `search_all` las consulta en paralelo,
+//! dedupe por infohash y ordena por seeders × calidad × idioma.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -48,6 +48,7 @@ pub struct MovieQuery {
 
 impl MovieQuery {
     /// Cadena de búsqueda por defecto (para providers que no soportan IDs).
+    #[allow(dead_code)]
     pub fn keywords(&self) -> String {
         match self.year {
             Some(y) => format!("{} {}", self.title, y),
@@ -241,6 +242,7 @@ pub fn format_size(bytes: u64) -> String {
 /// Pista sobre el audio de un release. Heurística basada en tokens habituales
 /// del scene/P2P — no es 100% fiable pero acierta en la mayoría de casos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AudioHint {
     /// Muy probable audio original (idioma coincide con el de rodaje).
     Original,
@@ -271,42 +273,49 @@ impl AudioHint {
 
 /// Clasifica el audio de un release a partir de su título y del idioma
 /// original de la película (del `original_language` de TMDB).
+///
+/// Reglas clave:
+/// * Si el título tiene marcadores multi-audio explícitos (MULTI, dual,
+///   `[EN+RUS]`…) → `Multi`. `WEB-DL` y variantes NO cuentan como
+///   multi-audio: es un marcador de fuente, no de idioma.
+/// * Si el título lleva un idioma detectable, se compara con
+///   `original_language`: si coincide es `Original`, si difiere es
+///   `Dubbed(iso)`. Esto evita castigar releases castellanos de
+///   películas españolas, italianos de películas italianas, etc.
+/// * Cirílico en el título se trata como pista de idioma ruso.
+/// * Si no aparece ningún marcador y el release no lleva cirílico, se
+///   asume audio original (default del scene internacional).
 pub fn classify_audio(title: &str, original_language: Option<&str>) -> AudioHint {
-    let t_orig = title;
     let t = title.to_lowercase();
-    let has_cyrillic = t_orig
+    let has_cyrillic = title
         .chars()
         .any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+    let ol = original_language
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
 
-    // Multi-audio explícito. Cubre los tags más frecuentes del scene:
-    //   MULTI, MULTi, MULTI4, MULTi5, MULTI+, dual audio, dual-audio,
-    //   da2, 2audio, DL (release alemán con audio dual), y combos
-    //   entre corchetes tipo [ENG+RUS], [EN.RU], [EN/RU/ES].
+    // Multi-audio explícito. NOTA: NO usamos `.dl.` / ` dl ` como se
+    // hacía antes: matcheaba WEB.DL (variante extendida de WEB-DL) y
+    // marcaba todos esos releases como multi. Si hace falta detectar
+    // German Dual, usa marcadores explícitos (`dual`, `.multi.`, etc.).
     if t.contains("multi")
         || t.contains("dual audio")
         || t.contains("dual-audio")
         || t.contains("dualaudio")
         || t.contains(" da2 ")
         || t.contains(" 2audio")
-        || t.contains(".dl.")
-        || t.contains(" dl ")
         || multi_language_bracket(&t)
     {
         return AudioHint::Multi;
     }
 
-    // Doblajes rusos (muy comunes en RuTracker): Dub, MVO, DVO, AVO
-    let ru_dub_markers = [" dub", " mvo", " dvo", " avo", "duo)", "dub ", "dub]"];
-    if has_cyrillic || ru_dub_markers.iter().any(|m| t.contains(m)) || t.contains("dub (") {
-        // Ojo: "dub" en un título en inglés sin cirílico suele ser doblaje
-        // no-ruso (LATAM/ES/IT). Reservamos ru solo si hay cirílico.
-        if has_cyrillic {
-            return AudioHint::Dubbed("ru");
-        }
-    }
-
-    // Doblajes castellano/latino
-    if t.contains("castellano")
+    // Detectamos el idioma de audio con la primera regla que matchee.
+    // Si coincide con el idioma original de la peli → `Original`; si no
+    // → `Dubbed(iso)`. Esto arregla el bug histórico de castigar
+    // releases castellanos de pelis españolas.
+    let detected: Option<&'static str> = if has_cyrillic {
+        Some("ru")
+    } else if t.contains("castellano")
         || t.contains("espanol")
         || t.contains("español")
         || t.contains("spanish")
@@ -314,85 +323,157 @@ pub fn classify_audio(title: &str, original_language: Option<&str>) -> AudioHint
         || t.contains("[esp]")
         || t.contains("latino")
     {
-        return AudioHint::Dubbed("es");
+        Some("es")
+    } else if t.contains(" ita ") || t.contains("italian") {
+        Some("it")
+    } else if t.contains(" fra ") || t.contains("french") {
+        Some("fr")
+    } else if t.contains(" ger ") || t.contains("german") || t.contains("deutsch") {
+        Some("de")
+    } else {
+        None
+    };
+
+    if let Some(iso) = detected {
+        return if ol == iso {
+            AudioHint::Original
+        } else {
+            AudioHint::Dubbed(iso)
+        };
     }
 
-    // Doblajes en otros idiomas europeos comunes
-    for (marker, lang) in [
-        (" ita ", "it"),
-        ("italian", "it"),
-        (" fra ", "fr"),
-        ("french", "fr"),
-        (" ger ", "de"),
-        ("german", "de"),
-        ("deutsch", "de"),
-    ] {
-        if t.contains(marker) {
-            return AudioHint::Dubbed(lang);
-        }
-    }
-
-    // Marcador genérico "dub" en cualquier release scene
+    // Marcador genérico "dub" sin idioma identificado.
     if t.contains(" dub") || t.contains(".dub.") || t.ends_with(" dub") {
         return AudioHint::Dubbed("??");
     }
 
-    // Si no aparece ningún marcador de doblaje y el título del release es
-    // "en inglés simple" (sin cirílico) y la peli es originalmente en inglés,
-    // asumimos audio original — es el default del scene internacional.
-    let ol = original_language.unwrap_or("");
-    if !has_cyrillic && ol == "en" {
-        return AudioHint::Original;
-    }
-
-    // Si tenemos original_language pero el release parece no llevar audio no
-    // original, también podemos marcarlo como original (poco fiable pero
-    // razonable).
-    if !has_cyrillic && !ol.is_empty() {
-        return AudioHint::Original;
-    }
-
-    AudioHint::Unknown
+    // Sin marcadores: asumimos audio original. En releases scene
+    // internacionales el default es "idioma original de la peli".
+    AudioHint::Original
 }
 
 /// Detecta patrones tipo `[ENG+RUS]`, `[EN.RU.ES]`, `[EN/FR]` en el título:
 /// dos o más códigos de idioma ISO 639-1/-2 dentro del mismo bracket o
-/// grupo entre puntos. Es un fallback pragmático — el scene marca
-/// multi-audio de mil formas distintas.
+/// grupo entre puntos.
+///
+/// Exige que cada código tenga *frontera de palabra* delante y detrás
+/// (separador o borde de grupo) para no contar coincidencias falsas como
+/// `en` dentro de `Golden`. Trabaja sobre bytes ASCII sin re-allocar.
 fn multi_language_bracket(t: &str) -> bool {
-    // Escaneamos ventanas cortas y contamos cuántos códigos de idioma
-    // conocidos aparecen juntos (separados por +/./,/-///espacio).
+    // Nota: `t` viene ya en minúsculas del caller. No re-lowercase.
     const LANG_CODES: &[&str] = &[
         "eng", "en", "rus", "ru", "esp", "spa", "es", "fre", "fra", "fr", "ita", "it", "ger",
         "deu", "de", "por", "pt", "jpn", "ja", "chi", "zh", "kor", "ko",
     ];
-    let mut count_in_group = 0;
-    let mut current_group_start = None;
-    for (i, ch) in t.char_indices() {
-        if ch == '[' || ch == '(' {
-            current_group_start = Some(i + 1);
-            count_in_group = 0;
-        } else if ch == ']' || ch == ')' {
-            if count_in_group >= 2 {
+    let bytes = t.as_bytes();
+    let mut in_group = false;
+    let mut count = 0u8;
+    let mut prev_is_sep = true;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'[' || ch == b'(' {
+            in_group = true;
+            count = 0;
+            prev_is_sep = true;
+            i += 1;
+            continue;
+        }
+        if ch == b']' || ch == b')' {
+            if count >= 2 {
                 return true;
             }
-            current_group_start = None;
-        } else if let Some(_start) = current_group_start {
-            // Cuando cerramos el grupo miramos si tenía múltiples idiomas.
-            // Aquí solo contamos codes visibles.
+            in_group = false;
+            prev_is_sep = true;
+            i += 1;
+            continue;
+        }
+        if !in_group {
+            prev_is_sep = !ch.is_ascii_alphabetic();
+            i += 1;
+            continue;
+        }
+        // Dentro de un grupo: intentamos matchear un código de idioma
+        // solo si venimos de un separador y este byte es alfabético
+        // (para no partir palabras como "Golden").
+        let is_alpha = ch.is_ascii_alphabetic();
+        let mut advance = 1usize;
+        if prev_is_sep && is_alpha {
             for code in LANG_CODES {
-                if t[i..].to_ascii_lowercase().starts_with(code) {
-                    // Comprobamos que no sea parte de otra palabra (bordes
-                    // simples: separador antes y después).
-                    let end = i + code.len();
-                    let after = t.as_bytes().get(end).copied().unwrap_or(b']');
+                let end = i + code.len();
+                if end <= bytes.len() && &bytes[i..end] == code.as_bytes() {
+                    let after = bytes.get(end).copied().unwrap_or(b' ');
                     if !after.is_ascii_alphabetic() {
-                        count_in_group += 1;
+                        count = count.saturating_add(1);
+                        advance = code.len();
+                        break;
                     }
-                    break;
+                }
+            }
+        }
+        // Si consumimos un código completo, el byte que sigue es
+        // separador por construcción (lo verificamos arriba con `after`).
+        prev_is_sep = if advance == 1 { !is_alpha } else { true };
+        i += advance;
+    }
+    false
+}
+
+// ---- Helpers compartidos entre providers / vistas ----
+
+/// Si `s` acaba en un año de 4 dígitos (1888-2100) separado por espacio,
+/// devuelve `(título_sin_año, Some(año))`. Si no, `(s, None)`.
+///
+/// Safe para entradas no-ASCII: usa `rfind(' ')` en lugar de `split_at`
+/// por bytes (la variante anterior paniqueaba con títulos cirílicos como
+/// "Амели" cuando el offset caía en mitad de un char multibyte).
+pub fn split_trailing_year(s: &str) -> (String, Option<u16>) {
+    let s = s.trim();
+    if let Some(idx) = s.rfind(' ') {
+        let tail = &s[idx + 1..];
+        if tail.len() == 4 {
+            if let Ok(y) = tail.parse::<u16>() {
+                if (1888..=2100).contains(&y) {
+                    return (s[..idx].trim().to_string(), Some(y));
                 }
             }
         }
     }
-    false
+    (s.to_string(), None)
+}
+
+/// Comprueba si el título de un release EMPIEZA con `needle` (case-
+/// insensitive). Ignora caracteres no alfanuméricos al principio de
+/// ambos lados (comillas, corchetes, guiones…). Usado por el fallback
+/// ruso para descartar releases que solo *mencionan* el título en su
+/// descripción en lugar de empezar por él.
+pub fn release_starts_with(release: &str, needle: &str) -> bool {
+    let release = release.to_lowercase();
+    let release = release.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let needle = needle.to_lowercase();
+    let needle = needle.trim_start_matches(|c: char| !c.is_alphanumeric());
+    release.starts_with(needle.trim())
+}
+
+/// Extrae años (1900-2099) del título del release y comprueba si alguno
+/// está dentro de ±`tolerance` del año buscado. Si el release no incluye
+/// ningún año, se acepta (no podemos discriminar y es preferible un
+/// falso positivo a perder el hit).
+pub fn release_matches_year(title: &str, target: u16, tolerance: u16) -> bool {
+    let mut has_year = false;
+    for token in title.split(|c: char| !c.is_alphanumeric()) {
+        if token.len() != 4 {
+            continue;
+        }
+        if let Ok(y) = token.parse::<u16>() {
+            if (1900..=2099).contains(&y) {
+                has_year = true;
+                if (target as i32 - y as i32).unsigned_abs() as u16 <= tolerance {
+                    return true;
+                }
+            }
+        }
+    }
+    !has_year
 }

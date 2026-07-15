@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{infohash_from_magnet, quality_from_title, MovieQuery, Torrent, TorrentProvider};
+use super::{
+    infohash_from_magnet, quality_from_title, release_matches_year, MovieQuery, Torrent,
+    TorrentProvider,
+};
 
 const BASE: &str = "https://api.knaben.org/v1";
 
@@ -107,33 +110,11 @@ impl TorrentProvider for Knaben {
         // llevar el año en el nombre, y para pelis internacionales el año
         // del scene puede ir 1 año antes o después del que TMDB reporta.
         if let Some(target) = q.year {
-            filtered.retain(|h| release_matches_year(&h.title, target));
+            filtered.retain(|h| release_matches_year(&h.title, target, 1));
         }
 
         Ok(hits_to_torrents(filtered))
     }
-}
-
-/// Extrae años (1900-2099) del título del release y comprueba si alguno
-/// está dentro de ±1 del año buscado. Si el release no incluye ningún año,
-/// se acepta (no podemos discriminar y es preferible un falso positivo a
-/// perder el hit).
-fn release_matches_year(title: &str, target: u16) -> bool {
-    let mut has_year = false;
-    for token in title.split(|c: char| !c.is_alphanumeric()) {
-        if token.len() != 4 {
-            continue;
-        }
-        if let Ok(y) = token.parse::<u16>() {
-            if (1900..=2099).contains(&y) {
-                has_year = true;
-                if (target as i32 - y as i32).abs() <= 1 {
-                    return true;
-                }
-            }
-        }
-    }
-    !has_year
 }
 
 /// Palabras cortas o vacías que no aportan discriminación. Idiomas: EN + ES.
@@ -158,6 +139,10 @@ fn tokenize(s: &str) -> std::collections::HashSet<String> {
 /// la gran mayoría) de las palabras significativas del título buscado.
 ///
 /// Reglas:
+/// * Si tras filtrar tokens `<3` chars y stopwords no queda ninguna
+///   `needle`, se aceptan todos los hits sin filtrar (títulos como "It",
+///   "Up", "Us" caerían a lista vacía de otra forma). El resto de
+///   filtros posteriores (año, seeders) ya bajan la basura.
 /// * Título con ≤3 tokens significativos → se exige match COMPLETO. Evita
 ///   falsos positivos en títulos cortos como "Play Dead".
 /// * Título con más tokens → basta con matchear ≥2/3 de ellos. Los títulos
@@ -165,7 +150,7 @@ fn tokenize(s: &str) -> std::collections::HashSet<String> {
 fn filter_by_token_overlap(hits: Vec<KnabenHit>, title: &str) -> Vec<KnabenHit> {
     let needles = tokenize(title);
     if needles.is_empty() {
-        return Vec::new();
+        return hits;
     }
     let need_all = needles.len() <= 3;
     let threshold = if need_all {

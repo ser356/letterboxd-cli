@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
+use crate::credentials;
 
 const TOKEN_CACHE_FILE: &str = "token.json";
 const LETTERBOXD_AUTH_URL: &str = "https://api.letterboxd.com/api/v0/auth/token";
@@ -60,6 +61,19 @@ fn load_cached_token() -> Option<String> {
     }
 }
 
+/// Borra el token de acceso cacheado en disco. Se llama desde `logout`
+/// para que el próximo `get_access_token` no devuelva un token todavía
+/// válido de la sesión anterior.
+#[allow(dead_code)]
+pub fn clear_cached_token() -> Result<()> {
+    let path = cache_path()?;
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("No se pudo borrar {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn save_token(token: &str, expires_in: u64) -> Result<()> {
     let cached = CachedToken {
         access_token: token.to_string(),
@@ -72,6 +86,13 @@ fn save_token(token: &str, expires_in: u64) -> Result<()> {
 }
 
 pub async fn get_access_token(client: &reqwest::Client, config: &Config) -> Result<String> {
+    // Si el user hizo logout el refresh_token en config es None; en ese
+    // caso NO queremos devolver un token viejo cacheado — la sesión debe
+    // considerarse cerrada.
+    if config.refresh_token.is_none() {
+        anyhow::bail!("No hay refresh_token — el usuario debe hacer login primero");
+    }
+
     if let Some(token) = load_cached_token() {
         return Ok(token);
     }
@@ -107,6 +128,15 @@ pub async fn get_access_token(client: &reqwest::Client, config: &Config) -> Resu
         .context("Error al parsear la respuesta del token")?;
 
     save_token(&token_resp.access_token, token_resp.expires_in)?;
+
+    // Letterboxd puede rotar el refresh_token en cada refresh. Si viene
+    // uno nuevo lo persistimos en credentials.json — si no, el user
+    // acaba expulsado silenciosamente cuando el viejo caduque.
+    if let Some(new_refresh) = token_resp.refresh_token.as_deref() {
+        if new_refresh != refresh_token && !new_refresh.is_empty() {
+            let _ = credentials::update_refresh_token(new_refresh);
+        }
+    }
 
     Ok(token_resp.access_token)
 }

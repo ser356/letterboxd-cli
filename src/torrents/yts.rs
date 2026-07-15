@@ -73,39 +73,63 @@ impl TorrentProvider for Yts {
             .await
             .context("Error al parsear respuesta de YTS")?;
 
-        let mut out = Vec::new();
-        for m in resp.data.movies.unwrap_or_default() {
-            // Si el usuario pidió un año concreto y YTS reporta otro,
-            // toleramos ±1 (cine internacional se estrena en distintos
-            // años según país; TMDB suele dar la fecha USA).
+        // YTS puede devolver varias películas con títulos parecidos
+        // ("Alien", "Aliens", "Alien 3"…). Antes se pusheaban torrents
+        // de todas ellas antes de decidir cuál era la buscada, así que
+        // sin --year el resultado mezclaba pelis distintas. Ahora
+        // seleccionamos una sola película y solo devolvemos sus
+        // torrents:
+        //   - Si viene `imdb_id`, la que coincida por IMDb.
+        //   - Si no, la primera cuyo título normalizado coincida
+        //     exactamente con el buscado (después del filtro de año).
+        let target = norm_title(&q.title);
+        let movies = resp.data.movies.unwrap_or_default();
+        let picked = movies.into_iter().find(|m| {
             if let (Some(want), Some(got)) = (q.year, m.year) {
                 if (want as i32 - got as i32).abs() > 1 {
-                    continue;
+                    return false;
                 }
             }
-
-            for t in m.torrents {
-                let display = format!("{} [{}] {}", m.title_long, t.quality, t.kind);
-                let magnet = build_magnet(&t.hash, &display);
-                out.push(Torrent {
-                    title: display,
-                    magnet,
-                    size_bytes: t.size_bytes,
-                    seeders: t.seeds,
-                    leechers: t.peers,
-                    quality: Some(t.quality),
-                    source: "yts",
-                    infohash: t.hash.to_ascii_uppercase(),
-                });
+            if let Some(imdb) = q.imdb_id.as_deref() {
+                m.imdb_code == imdb
+            } else {
+                norm_title(&m.title_long) == target
             }
+        });
 
-            // Log de qué peli acertamos, útil si el usuario ve resultados raros.
-            if !m.imdb_code.is_empty() && q.imdb_id.as_deref() == Some(&m.imdb_code) {
-                // match perfecto por IMDb; no seguimos comparando otras pelis.
-                break;
-            }
+        let Some(m) = picked else {
+            return Ok(Vec::new());
+        };
+
+        let mut out = Vec::with_capacity(m.torrents.len());
+        for t in m.torrents {
+            let display = format!("{} [{}] {}", m.title_long, t.quality, t.kind);
+            let magnet = build_magnet(&t.hash, &display);
+            out.push(Torrent {
+                title: display,
+                magnet,
+                size_bytes: t.size_bytes,
+                seeders: t.seeds,
+                leechers: t.peers,
+                quality: Some(t.quality),
+                source: "yts",
+                infohash: t.hash.to_ascii_uppercase(),
+            });
         }
 
         Ok(out)
     }
+}
+
+/// Normaliza un título para comparar YTS con la query del user:
+/// lowercase, quita el año trailing (`(1979)`), y colapsa todo lo no
+/// alfanumérico a espacios simples. `norm_title("Alien (1979)") ==
+/// "alien"` y `norm_title("Aliens") == "aliens"`.
+fn norm_title(s: &str) -> String {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .filter(|w| !(w.len() == 4 && w.chars().all(|c| c.is_ascii_digit())))
+        .collect::<Vec<_>>()
+        .join(" ")
 }

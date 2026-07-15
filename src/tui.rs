@@ -26,7 +26,7 @@ use crate::progress::Progress;
 use crate::recommend::{build_recommendations, Recommendation};
 use crate::subtitles::{self, Subtitle};
 use crate::tmdb::TmdbClient;
-use crate::torrents::{self, MovieQuery, Torrent};
+use crate::torrents::{self, release_starts_with, split_trailing_year, MovieQuery, Torrent};
 
 const HELP_MENU: &str = "j/k mover · Enter seleccionar · q salir";
 const HELP_RECS: &str =
@@ -382,7 +382,13 @@ async fn run_app(
                     WorkerEvent::Inc => app.stage_pos += 1,
                     WorkerEvent::Done(recs) => {
                         app.loading = false;
-                        app.stale = false;
+                        // Si el user movió -/+/[/] durante la carga, los
+                        // parámetros mostrados ya no coinciden con los
+                        // usados para calcular `recs` → mantenemos el
+                        // aviso "par\u00e1metros modificados" (stale=true).
+                        if !app.stale {
+                            app.stale = false;
+                        }
                         app.error = None;
                         app.list_state
                             .select(if recs.is_empty() { None } else { Some(0) });
@@ -669,10 +675,11 @@ async fn run_app(
                         app.search_input.pop();
                     }
                     KeyCode::Char(c) => {
-                        // Ojo: KeyCode::Char('q') se procesa arriba antes
-                        // que este match, así que no se puede escribir
-                        // 'q' en el input. Trueque razonable — para
-                        // salir se usa Esc en Search.
+                        // 'q' se acepta como cualquier otro carácter: el
+                        // handler global de 'q' que cierra la app está
+                        // gateado a `!= View::Search && != View::Login`,
+                        // así que aquí sí llega. En Search se sale con
+                        // Esc.
                         app.search_input.push(c);
                     }
                     _ => {}
@@ -702,7 +709,10 @@ async fn run_app(
                         app.count = app.count.saturating_sub(5).max(1);
                         app.stale = true;
                     }
-                    KeyCode::Char('t') => {
+                    KeyCode::Char('t') if !app.tor_loading => {
+                        // Guard: si ya estamos cargando torrents, ignoramos
+                        // el 't' para no arrancar dos búsquedas y machacar
+                        // el canal.
                         spawn_torrents(&config, &http, &mut app, &mut tor_rx);
                     }
                     _ => {}
@@ -731,6 +741,20 @@ async fn run_app(
                     KeyCode::Char('s') => {
                         if let Some(i) = app.tor_state.selected() {
                             if let Some(t) = app.tor_results.get(i).cloned() {
+                                // Guard: si ya arrancamos un stream y aún
+                                // no llegó el `Ready`, ignoramos la
+                                // pulsación. Sin esto dos 's' seguidas
+                                // spawn dos librqbit y dos VLC; el segundo
+                                // `Ready` pisa el handle del primero y el
+                                // player anterior se queda huérfano.
+                                let starting = app
+                                    .stream_msg
+                                    .as_deref()
+                                    .map(|m| m.starts_with("Iniciando stream:"))
+                                    .unwrap_or(false);
+                                if starting {
+                                    continue;
+                                }
                                 // Si había un stream anterior (por
                                 // ejemplo, VLC ya cerrado pero handle
                                 // aún en memoria), lo tiramos ahora
@@ -1098,22 +1122,9 @@ fn spawn_direct_search(
     });
 }
 
-/// Si `s` acaba en un año de 4 dígitos (1900-2099) separado por espacio,
-/// devuelve `(title_sin_año, Some(año))`. Si no, `(s, None)`.
-fn split_trailing_year(s: &str) -> (String, Option<u16>) {
-    let s = s.trim();
-    if let Some(idx) = s.rfind(' ') {
-        let tail = &s[idx + 1..];
-        if tail.len() == 4 {
-            if let Ok(y) = tail.parse::<u16>() {
-                if (1900..=2099).contains(&y) {
-                    return (s[..idx].trim().to_string(), Some(y));
-                }
-            }
-        }
-    }
-    (s.to_string(), None)
-}
+// `split_trailing_year` y `release_starts_with` viven en
+// `torrents::` y se importan arriba — la definición local se retiró
+// para no divergir con la GUI (ver informe de revisión).
 
 /// Lanza en tokio el intento de login con usuario/contraseña. Los datos se
 /// leen del `App` (los inputs de la vista Login) y el resultado se emite
@@ -1150,17 +1161,7 @@ fn spawn_login(
     });
 }
 
-/// Comprueba si el título de un release EMPIEZA con `needle` (ambos en
-/// minúsculas). Ignora caracteres no-alfanuméricos al principio (comillas,
-/// corchetes, guiones, etc). Usado por el fallback ruso para descartar
-/// releases que solo *mencionan* el título en su descripción.
-fn release_starts_with(release: &str, needle: &str) -> bool {
-    let release = release.to_lowercase();
-    let release = release.trim_start_matches(|c: char| !c.is_alphanumeric());
-    let needle = needle.to_lowercase();
-    let needle = needle.trim_start_matches(|c: char| !c.is_alphanumeric());
-    release.starts_with(needle.trim())
-}
+// (release_starts_with movido a torrents::)
 
 fn draw(f: &mut Frame, app: &mut App) {
     match app.view {

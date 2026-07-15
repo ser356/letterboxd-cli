@@ -14,7 +14,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{build_magnet, quality_from_title, MovieQuery, Torrent, TorrentProvider};
+use super::{
+    build_magnet, quality_from_title, release_matches_year, MovieQuery, Torrent, TorrentProvider,
+};
 
 /// Categorías TPB de vídeo (200 = Video, 201 = Movies, 202 = Movies DVDR,
 /// 205 = TV shows, 207 = HD movies, 208 = HD TV, 211 = 3D). Usamos el
@@ -47,12 +49,11 @@ impl TorrentProvider for Apibay {
     }
 
     async fn search(&self, http: &reqwest::Client, q: &MovieQuery) -> Result<Vec<Torrent>> {
-        // No usamos IMDb como keyword: apibay lo indexa esporádicamente y
-        // hunde el recall. El título con año es lo que mejor funciona.
-        let query = match q.year {
-            Some(y) => format!("{} {}", q.title.trim(), y),
-            None => q.title.trim().to_string(),
-        };
+        // Política unificada con Knaben: NUNCA metemos el año en la
+        // query (los grupos etiquetan el año de estreno del país
+        // original y no el USA que TMDB reporta). Filtramos por año
+        // ±1 después.
+        let query = q.title.trim().to_string();
 
         let url = format!(
             "{BASE}?q={}&cat={CATEGORY_VIDEO}",
@@ -74,27 +75,13 @@ impl TorrentProvider for Apibay {
             .await
             .context("Error al parsear respuesta de apibay")?;
 
-        // Fallback sin año si el query con año salió vacío (por el
-        // sentinel de apibay). Algunos releases no llevan el año en el
-        // nombre y la búsqueda "Título 1999" no los encuentra.
-        let hits = if q.year.is_some() && looks_empty(&hits) {
-            let url = format!(
-                "{BASE}?q={}&cat={CATEGORY_VIDEO}",
-                urlencoding::encode(q.title.trim())
-            );
-            match http.get(&url).send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json::<Vec<ApibayHit>>().await.unwrap_or_default()
-                }
-                _ => Vec::new(),
-            }
-        } else {
-            hits
-        };
-
         Ok(hits
             .into_iter()
             .filter(|h| h.info_hash != EMPTY_HASH && !h.info_hash.is_empty())
+            .filter(|h| match q.year {
+                Some(target) => release_matches_year(&h.name, target, 1),
+                None => true,
+            })
             .filter_map(|h| {
                 let seeders = h.seeders.parse::<u32>().ok()?;
                 let leechers = h.leechers.parse::<u32>().unwrap_or(0);
@@ -114,9 +101,4 @@ impl TorrentProvider for Apibay {
             })
             .collect())
     }
-}
-
-/// apibay devuelve `[{ info_hash: "000...0", ... }]` cuando no hay hits.
-fn looks_empty(hits: &[ApibayHit]) -> bool {
-    hits.is_empty() || hits.iter().all(|h| h.info_hash == EMPTY_HASH)
 }
