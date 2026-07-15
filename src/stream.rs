@@ -85,6 +85,14 @@ struct AppState {
     handle: Arc<ManagedTorrent>,
     file_id: usize,
     file_len: u64,
+    /// Token de la petición HTTP en curso para este stream. Cuando llega
+    /// una nueva Range request (típicamente porque VLC ha hecho seek),
+    /// cancelamos la anterior aquí antes de crear la nueva. Sin esto el
+    /// FileStream antiguo sigue vivo dentro del `body` de axum — y
+    /// librqbit intercala pieces de todos los FileStreams activos, con lo
+    /// que el nuevo (el que VLC está esperando) solo se lleva la mitad
+    /// del ancho de banda. Resultado: buffering infinito tras cada seek.
+    active_request: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
 }
 
 /// Lista de trackers públicos que se inyectan en cada torrent. Muchos
@@ -199,6 +207,7 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
         handle: handle.clone(),
         file_id,
         file_len,
+        active_request: Arc::new(tokio::sync::Mutex::new(None)),
     };
     let app = Router::new()
         .route("/video", get(serve_video))
@@ -274,6 +283,17 @@ async fn serve_video(
 
     let content_length = end - start + 1;
 
+    // Cancela la petición HTTP anterior antes de arrancar la nueva. Así
+    // el FileStream viejo se dropea y librqbit deja de repartir ancho de
+    // banda con él — véase el comentario de `active_request` en `AppState`.
+    let request_token = CancellationToken::new();
+    {
+        let mut guard = state.active_request.lock().await;
+        if let Some(prev) = guard.replace(request_token.clone()) {
+            prev.cancel();
+        }
+    }
+
     // Crea un stream nuevo por request (librqbit gestiona la prioridad de
     // piezas por stream registrado).
     let mut file_stream = state
@@ -289,12 +309,16 @@ async fn serve_video(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    // Convierte AsyncRead en un Stream<Item=Bytes> con límite.
+    // Convierte AsyncRead en un Stream<Item=Bytes> con límite y con
+    // corte al cancelar el token de esta request. `take_until` deja de
+    // yield-ear en cuanto la petición siguiente sobrescriba el token.
     let limited = LimitedRead {
         inner: file_stream,
         remaining: content_length,
     };
-    let stream = tokio_util::io::ReaderStream::with_capacity(limited, 64 * 1024);
+    let raw = tokio_util::io::ReaderStream::with_capacity(limited, 64 * 1024);
+    let cancel_fut = async move { request_token.cancelled().await };
+    let stream = futures::stream::StreamExt::take_until(raw, Box::pin(cancel_fut));
     let body = Body::from_stream(stream);
 
     let status = if range.is_some() {
