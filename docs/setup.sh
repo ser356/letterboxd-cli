@@ -86,9 +86,45 @@ fi
 # ── macOS: Homebrew + cask ──────────────────────────────────────────────
 install_macos() {
   if ! command -v brew >/dev/null 2>&1; then
-    step "Homebrew no encontrado. Instalándolo (te pedirá sudo)..."
-    NONINTERACTIVE=1 /bin/bash -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Homebrew necesita sudo (crea /opt/homebrew y hace chown). Cuando
+    # este script se ejecuta vía `curl | bash`, stdin es un pipe, no un
+    # TTY → sudo no puede pedir password y falla con "a terminal is
+    # required". Detectamos ese caso y redirigimos stdin a /dev/tty
+    # antes de invocar al installer oficial.
+    step "Homebrew no encontrado. Vamos a instalarlo (te pedirá sudo)."
+
+    local brew_installer
+    brew_installer=$(mktemp)
+    curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
+      -o "$brew_installer" \
+      || fail "No pude descargar el installer de Homebrew."
+
+    if [ -t 0 ]; then
+      # Terminal interactivo: dejar que el script pregunte lo que
+      # necesite. No poner NONINTERACTIVE — el usuario tiene TTY.
+      /bin/bash "$brew_installer" \
+        || { rm -f "$brew_installer"; fail "Fallo instalando Homebrew."; }
+    elif [ -e /dev/tty ]; then
+      # Stdin es pipe (curl|bash) pero hay /dev/tty accesible.
+      # Redirigimos stdin del installer al terminal real para que sudo
+      # pueda leer el password.
+      warn "Estás ejecutando por pipe (curl|bash). Redirigiendo la entrada a tu terminal para el prompt de sudo..."
+      /bin/bash "$brew_installer" </dev/tty \
+        || { rm -f "$brew_installer"; fail "Fallo instalando Homebrew."; }
+    else
+      rm -f "$brew_installer"
+      cat >&2 <<EOF
+
+${YELLOW}!${RESET} No tienes Homebrew y no hay terminal interactivo (${DIM}no /dev/tty${RESET}).
+  Instala Homebrew manualmente y reejecuta este script:
+
+    ${BOLD}/bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"${RESET}
+    ${BOLD}curl -fsSL https://ser356.github.io/videodrome/setup.sh | bash${RESET}
+
+EOF
+      exit 1
+    fi
+    rm -f "$brew_installer"
 
     # Añadir brew al PATH del shell actual — el script de Homebrew
     # deja `brew shellenv` en el profile pero no lo carga en esta sesión.
