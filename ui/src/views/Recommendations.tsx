@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { BackButton } from '../components/BackButton'
+import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { FiltersDropdown } from '../components/FiltersDropdown'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { MovieDetailModal } from '../components/MovieDetailModal'
@@ -8,6 +9,7 @@ import { SearchBox } from '../components/SearchBox'
 import { Toast } from '../components/Toast'
 import { TopNav } from '../components/TopNav'
 import {
+  dismissRecommendation,
   getPreferences,
   getRecommendations,
   isTauri,
@@ -35,6 +37,20 @@ export function Recommendations() {
   const [stale, setStale] = useState(false)
   const [sel, setSel] = useState(0)
   const [detail, setDetail] = useState<Recommendation | null>(null)
+  // ID temporalmente marcado con la animación de fade-out mientras el
+  // backend refresca la lista. Solo hay uno a la vez (el user hace
+  // dismiss sobre una card).
+  const [dismissingId, setDismissingId] = useState<number | null>(null)
+  // Menú contextual (click derecho) sobre una card.
+  const [menu, setMenu] = useState<{
+    x: number
+    y: number
+    rec: Recommendation
+  } | null>(null)
+  // Toast efímero para confirmar el "no sugerir" con opción de
+  // restaurar desde Ajustes. Sin este feedback el user queda con la
+  // duda de si el descarte se guardó de verdad.
+  const [flashMsg, setFlashMsg] = useState<string | null>(null)
 
   const fetchRecs = useCallback(() => {
     if (!isTauri()) {
@@ -108,6 +124,49 @@ export function Recommendations() {
     )
   }
 
+  /**
+   * "No sugerir" reactivo: marca la card seleccionada con la animación
+   * de fade-out, pide al backend la lista fresca (que ya viene sin la
+   * descartada y con el reemplazo al final), y sustituye el estado
+   * cuando la animación acaba. El backend garantiza que devuelve
+   * `count` resultados si tiene material — la vista nunca "encoge".
+   */
+  const dismissCurrent = async (rec: Recommendation) => {
+    if (dismissingId !== null) return
+    setDismissingId(rec.movie.id)
+    // Timing: la animación dura 220ms; esperamos ese margen antes de
+    // hacer el swap, y en paralelo lanzamos la refresh contra backend.
+    const refresh = dismissRecommendation(
+      rec.movie.id,
+      rec.movie.title,
+      rec.movie.poster_path,
+      count,
+      minRating,
+    )
+    const [freshList] = await Promise.all([
+      refresh,
+      new Promise((r) => setTimeout(r, 220)),
+    ]).catch(() => [null] as const)
+    setDismissingId(null)
+    if (!freshList) {
+      setFlashMsg('No se pudo descartar. Reintenta.')
+      return
+    }
+    setItems(freshList)
+    // Mantén la selección en la misma posición visual (si aún cabe).
+    setSel((i) => Math.min(i, Math.max(0, freshList.length - 1)))
+    setFlashMsg(
+      `Descartada: ${rec.movie.title}. Restaurar desde Ajustes.`,
+    )
+  }
+
+  // Auto-hide del toast de dismiss.
+  useEffect(() => {
+    if (!flashMsg) return
+    const t = setTimeout(() => setFlashMsg(null), 3200)
+    return () => clearTimeout(t)
+  }, [flashMsg])
+
   const n = items?.length ?? 0
   const move = (delta: number) => {
     if (n === 0) return
@@ -148,7 +207,7 @@ export function Recommendations() {
     { key: 'Escape', hint: '', run: () => nav('/') },
   ]
   useHotkeys(hotkeys, [items, sel, count, minRating, fetchRecs], {
-    enabled: detail === null,
+    enabled: detail === null && menu === null,
   })
 
   return (
@@ -195,15 +254,20 @@ export function Recommendations() {
                 key={rec.movie.id}
                 rec={rec}
                 active={i === sel}
+                dismissing={rec.movie.id === dismissingId}
                 onClick={() => setDetail(rec)}
                 onMouseEnter={() => setSel(i)}
+                onContextMenu={(x, y) => {
+                  setSel(i)
+                  setMenu({ x, y, rec })
+                }}
               />
             ))}
           </ul>
         )}
       </main>
 
-      <Toast visible={stale && !loading}>
+      <Toast visible={stale && !loading && flashMsg === null}>
         <span className="text-muted">Hay cambios pendientes.</span>
         <span>
           Pulsa <span className="font-semibold text-ink">R</span> para
@@ -211,7 +275,41 @@ export function Recommendations() {
         </span>
       </Toast>
 
+      <Toast visible={flashMsg !== null}>
+        <span className="text-body">{flashMsg}</span>
+      </Toast>
+
       <HotkeyBar hotkeys={hotkeys.filter((h) => h.hint)} />
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={((): ContextMenuItem[] => {
+            const rec = menu.rec
+            return [
+              {
+                label: 'Ver detalle',
+                hint: '↵',
+                onClick: () => setDetail(rec),
+              },
+              {
+                label: 'Ver torrents',
+                hint: 't',
+                onClick: () => openTorrents(rec),
+              },
+              {
+                label: 'No sugerir',
+                destructive: true,
+                onClick: () => {
+                  void dismissCurrent(rec)
+                },
+              },
+            ]
+          })()}
+        />
+      )}
 
       {detail && (
         <MovieDetailModal
@@ -232,23 +330,31 @@ export function Recommendations() {
 function MovieCard({
   rec,
   active,
+  dismissing,
   onClick,
   onMouseEnter,
+  onContextMenu,
 }: {
   rec: Recommendation
   active: boolean
+  dismissing: boolean
   onClick: () => void
   onMouseEnter: () => void
+  onContextMenu: (x: number, y: number) => void
 }) {
   const { movie } = rec
   const year = movie.release_date?.slice(0, 4) ?? ''
   const src = tmdbPoster(movie.poster_path)
 
   return (
-    <li>
+    <li className={dismissing ? 'animate-dismiss' : 'animate-card-in'}>
       <button
         onClick={onClick}
         onMouseEnter={onMouseEnter}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          onContextMenu(e.clientX, e.clientY)
+        }}
         className="focus-ring group block w-full rounded-poster text-left"
       >
         <div

@@ -108,6 +108,36 @@ export const getRecommendations = (count: number, minRating: number) =>
 export const getMovieView = (tmdbId: number) =>
   invoke<MovieView | null>('get_movie_view', { tmdbId })
 
+/** Marca una película como "no sugerir" y devuelve la lista fresca del
+ * mismo tamaño (`count`) — el UI la sustituye en caliente sin recargar. */
+export const dismissRecommendation = (
+  tmdbId: number,
+  title: string,
+  posterPath: string | null,
+  count: number,
+  minRating: number,
+) =>
+  invoke<Recommendation[]>('dismiss_recommendation', {
+    tmdbId,
+    title,
+    posterPath,
+    count,
+    minRating,
+  })
+
+export const undismissRecommendation = (tmdbId: number) =>
+  invoke<void>('undismiss_recommendation', { tmdbId })
+
+export interface DismissedEntry {
+  id: number
+  title: string
+  poster_path: string | null
+  dismissed_at: number
+}
+
+export const listDismissed = () =>
+  invoke<DismissedEntry[]>('list_dismissed')
+
 // -------- Torrents --------
 
 export const searchTorrentsByTmdb = (
@@ -201,6 +231,9 @@ export interface Preferences {
   subtitle_languages: string
   /** TTL de la caché de streams en días (auto-prune al arrancar). */
   stream_cache_ttl_days: number
+  /** Opacidad del "liquid glass" (0..=100). 0 = default translúcido,
+   * 100 = superficies casi sólidas para máxima legibilidad. */
+  glass_opacity: number
 }
 
 export const cacheInfo = () => invoke<CacheEntry[]>('cache_info')

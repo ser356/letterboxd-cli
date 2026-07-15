@@ -11,12 +11,17 @@ import {
   getUsername,
   hasSession,
   isTauri,
+  listDismissed,
   logout,
   setPreferences,
+  tmdbPoster,
+  undismissRecommendation,
   type CacheEntry,
+  type DismissedEntry,
   type Preferences,
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { applyGlassOpacity } from '../lib/theme'
 
 /**
  * Vista de Ajustes. Tres bloques:
@@ -36,6 +41,7 @@ export function Settings() {
   const [username, setUsername] = useState<string | null>(null)
   const [prefs, setPrefs] = useState<Preferences | null>(null)
   const [caches, setCaches] = useState<CacheEntry[] | null>(null)
+  const [dismissed, setDismissed] = useState<DismissedEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -46,13 +52,15 @@ export function Settings() {
       return
     }
     try {
-      const [hasS, list, p] = await Promise.all([
+      const [hasS, list, p, dis] = await Promise.all([
         hasSession(),
         cacheInfo(),
         getPreferences(),
+        listDismissed(),
       ])
       setCaches(list)
       setPrefs(p)
+      setDismissed(dis)
       if (hasS) {
         setUsername(await getUsername())
       } else {
@@ -112,6 +120,16 @@ export function Settings() {
       setError(String(e))
     } finally {
       setSaving(false)
+    }
+  }
+
+  const onRestoreDismissed = async (id: number, title: string) => {
+    try {
+      await undismissRecommendation(id)
+      setDismissed((prev) => prev?.filter((e) => e.id !== id) ?? null)
+      flash(`Restaurada: ${title}`)
+    } catch (e) {
+      setError(String(e))
     }
   }
 
@@ -177,6 +195,37 @@ export function Settings() {
             />
           ) : (
             <div className="text-[13px] text-muted">Cargando…</div>
+          )}
+        </Section>
+
+        <Section
+          title="Sugerencias descartadas"
+          action={
+            dismissed && dismissed.length > 0 ? (
+              <span className="text-[11px] tabular-nums text-dim">
+                {dismissed.length}{' '}
+                {dismissed.length === 1 ? 'película' : 'películas'}
+              </span>
+            ) : null
+          }
+        >
+          {dismissed === null ? (
+            <div className="text-[13px] text-muted">Cargando…</div>
+          ) : dismissed.length === 0 ? (
+            <p className="text-[13px] text-muted">
+              No has descartado ninguna recomendación. Usa clic derecho
+              sobre una peli en Cartelera → "No sugerir".
+            </p>
+          ) : (
+            <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+              {dismissed.map((d) => (
+                <DismissedCard
+                  key={d.id}
+                  entry={d}
+                  onRestore={() => onRestoreDismissed(d.id, d.title)}
+                />
+              ))}
+            </ul>
           )}
         </Section>
 
@@ -250,12 +299,22 @@ function PreferencesEditor({
   const [count, setCount] = useState(prefs.default_count)
   const [langs, setLangs] = useState(prefs.subtitle_languages)
   const [ttl, setTtl] = useState(prefs.stream_cache_ttl_days)
+  const [glass, setGlass] = useState(prefs.glass_opacity)
 
   const dirty =
     rating !== prefs.default_min_rating ||
     count !== prefs.default_count ||
     langs.trim() !== prefs.subtitle_languages.trim() ||
-    ttl !== prefs.stream_cache_ttl_days
+    ttl !== prefs.stream_cache_ttl_days ||
+    glass !== prefs.glass_opacity
+
+  // Preview en vivo del slider de liquid glass: aplicamos la variable
+  // CSS al arrastrar aunque el usuario aún no haya pulsado "Guardar".
+  // Si abandona sin guardar y vuelve, el `main.tsx` la re-establecerá
+  // al valor persistido al recargar la app.
+  useEffect(() => {
+    applyGlassOpacity(glass)
+  }, [glass])
 
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -317,6 +376,25 @@ function PreferencesEditor({
         />
       </Field>
 
+      <Field
+        label={`Opacidad del liquid glass · ${glass}%`}
+        hint="0 = translúcido máximo (default). 100 = superficies casi sólidas, más legibles sobre grids de pósters."
+      >
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-dim">Cristal</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={glass}
+            onChange={(e) => setGlass(Number(e.target.value))}
+            className="focus-ring h-2 flex-1 cursor-pointer appearance-none rounded-full bg-surface accent-accent"
+          />
+          <span className="text-[11px] text-dim">Sólido</span>
+        </div>
+      </Field>
+
       <div className="flex items-end justify-end sm:col-span-2">
         <button
           disabled={!dirty || saving}
@@ -326,6 +404,7 @@ function PreferencesEditor({
               default_count: count,
               subtitle_languages: langs.trim(),
               stream_cache_ttl_days: ttl,
+              glass_opacity: glass,
             })
           }
           className="focus-ring h-10 rounded-full bg-accent px-5 text-[13px] font-semibold text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-accent-disabled"
@@ -402,4 +481,42 @@ function formatAge(unixSeconds: number): string {
   if (diff < 3600) return `hace ${Math.floor(diff / 60)}min`
   if (diff < 86400) return `hace ${Math.floor(diff / 3600)}h`
   return `hace ${Math.floor(diff / 86400)}d`
+}
+
+function DismissedCard({
+  entry,
+  onRestore,
+}: {
+  entry: DismissedEntry
+  onRestore: () => void
+}) {
+  const src = tmdbPoster(entry.poster_path, 'w342')
+  return (
+    <li className="flex flex-col gap-2 animate-card-in">
+      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-poster bg-surface-hi">
+        {src ? (
+          <img
+            src={src}
+            alt={`Poster de ${entry.title}`}
+            loading="lazy"
+            className="h-full w-full object-cover opacity-70"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center px-2 text-center text-[11px] text-dim">
+            {entry.title}
+          </div>
+        )}
+        <div className="absolute inset-0 bg-black/30" />
+      </div>
+      <div className="flex min-w-0 items-baseline justify-between gap-2">
+        <p className="truncate text-[12px] text-body">{entry.title}</p>
+      </div>
+      <button
+        onClick={onRestore}
+        className="focus-ring rounded-full border border-hairline px-3 py-1 text-[11px] text-body hover:border-accent hover:text-accent"
+      >
+        Restaurar
+      </button>
+    </li>
+  )
 }

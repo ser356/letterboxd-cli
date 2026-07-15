@@ -14,6 +14,8 @@ mod auth;
 mod config;
 mod credentials;
 #[cfg(feature = "gui")]
+mod dismissed;
+#[cfg(feature = "gui")]
 mod gui;
 mod keychain;
 mod letterboxd;

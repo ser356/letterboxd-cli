@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 use crate::auth;
 use crate::config::Config;
 use crate::credentials::{self, Credentials};
+use crate::dismissed::{self, DismissedEntry};
 use crate::letterboxd::LetterboxdClient;
 use crate::preferences::{self, Preferences};
 use crate::progress::Progress;
@@ -209,9 +210,66 @@ async fn get_recommendations(
         .map_err(|e| e.to_string())?;
     let lb = LetterboxdClient::new(&state.http, &token);
     let tmdb = TmdbClient::new(&state.http, &config.tmdb_bearer_token);
-    build_recommendations(&lb, &tmdb, count, min_rating, &Silent)
+
+    // Sobre-pedimos `count + dismissed_len` (con techo) para que el
+    // usuario reciba siempre `count` resultados aunque haya descartado
+    // varias películas — la lista no "encoge" al ir diciendo no sugerir.
+    // El techo evita ampliar sin límite si el user ha descartado 500.
+    let dismissed = dismissed::load();
+    let dismissed_ids = dismissed.ids();
+    let extra = dismissed_ids.len().min(count * 5);
+    let fetch = count.saturating_add(extra);
+
+    let mut recs = build_recommendations(&lb, &tmdb, fetch, min_rating, &Silent)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    recs.retain(|r| !dismissed_ids.contains(&r.movie.id));
+    recs.truncate(count);
+    Ok(recs)
+}
+
+/// Marca una película como "no sugerir" y devuelve la lista de
+/// recomendaciones ya refrescada, del mismo tamaño (`count`) que la
+/// que estaba viendo el usuario. Así el frontend puede reemplazar en
+/// caliente sin recargar la vista.
+#[tauri::command]
+async fn dismiss_recommendation(
+    tmdb_id: u64,
+    title: String,
+    poster_path: Option<String>,
+    count: usize,
+    min_rating: f32,
+    state: State<'_, AppState>,
+) -> Result<Vec<Recommendation>, String> {
+    let mut store = dismissed::load();
+    store.insert(DismissedEntry {
+        id: tmdb_id,
+        title,
+        poster_path,
+        dismissed_at: now_unix(),
+    });
+    dismissed::save(&store).map_err(|e| e.to_string())?;
+    get_recommendations(count, min_rating, state).await
+}
+
+/// Restaura una película descartada (la borra del `dismissed.json`).
+/// No refresca recomendaciones — el usuario lo hace desde Ajustes; en
+/// la próxima carga de la vista Recs aparecerá si califica.
+#[tauri::command]
+async fn undismiss_recommendation(tmdb_id: u64) -> Result<(), String> {
+    let mut store = dismissed::load();
+    store.remove(tmdb_id);
+    dismissed::save(&store).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Lista los descartes actuales, ordenados por más recientes primero.
+/// Alimenta el panel "Restaurar sugerencias" en Ajustes.
+#[tauri::command]
+async fn list_dismissed() -> Result<Vec<DismissedEntry>, String> {
+    let mut entries = dismissed::load().entries;
+    entries.sort_by_key(|e| std::cmp::Reverse(e.dismissed_at));
+    Ok(entries)
 }
 
 /// Detalle de una película para el modal estilo Stremio: sinopsis,
@@ -879,6 +937,9 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             login,
             get_username,
             get_recommendations,
+            dismiss_recommendation,
+            undismiss_recommendation,
+            list_dismissed,
             get_movie_view,
             search_movies_tmdb,
             search_torrents_by_tmdb,

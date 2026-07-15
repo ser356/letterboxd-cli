@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { AskSubsDialog } from '../components/AskSubsDialog'
+import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { ResumeDialog } from '../components/ResumeDialog'
 import { StreamPanel } from '../components/StreamPanel'
@@ -56,6 +57,20 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   const [subsLoading, setSubsLoading] = useState(false)
   const [subs, setSubs] = useState<Subtitle[]>([])
   const [pendingSubPath, setPendingSubPath] = useState<string | null>(null)
+  // Nombre legible del sub cargado (release / file_name). Se guarda al
+  // mismo tiempo que `pendingSubPath` para poder mostrarlo en el toast
+  // cuando el user re-lanza un stream con el mismo sub sin volver a
+  // abrir el sheet de selección.
+  const [pendingSubRelease, setPendingSubRelease] = useState<string | null>(
+    null,
+  )
+
+  // Menú contextual (click derecho) sobre una fila de torrent.
+  const [menu, setMenu] = useState<{
+    x: number
+    y: number
+    index: number
+  } | null>(null)
 
   // Resume state: se pregunta ANTES del stream cuando la caché tiene
   // una posición previa reproducible (fraction en 2%–95% y runtime
@@ -190,9 +205,16 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   }
 
   // Enter en la lista de torrents: preguntar por subs antes de streamear.
-  // Si no hay torrent seleccionado, no-op.
+  // Si no hay torrent seleccionado, no-op. Si ya hay un sub cargado
+  // (pendingSubPath), saltamos el AskSubsDialog y vamos directos al
+  // flujo de resume/stream — el usuario ya expresó "quiero subs" al
+  // seleccionar uno; que la app le vuelva a preguntar es ruido.
   const startStreamFlow = () => {
     if (!current) return
+    if (pendingSubPath) {
+      void maybePromptResume(pendingSubPath, pendingSubRelease)
+      return
+    }
     setAskSubsOpen(true)
   }
 
@@ -204,6 +226,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   const confirmStreamWithoutSubs = async () => {
     setAskSubsOpen(false)
     setPendingSubPath(null)
+    setPendingSubRelease(null)
     await maybePromptResume(null, null)
   }
 
@@ -229,6 +252,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       const path = await downloadSubtitle(sub)
       const release = sub.release || sub.file_name || 'sub'
       setPendingSubPath(path)
+      setPendingSubRelease(release)
       setSubsOpen(false)
       // Encadenar con el stream: el usuario ya confirmó "con subs" en
       // el diálogo previo, no hay que volver a pedir Enter.
@@ -237,6 +261,22 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
       setStreamMsg(`Error descargando sub: ${String(e)}`)
     } finally {
       setSubsLoading(false)
+    }
+  }
+
+  const clearPendingSub = () => {
+    setPendingSubPath(null)
+    setPendingSubRelease(null)
+    setStreamMsg('Subtítulos quitados. El próximo stream irá sin subs.')
+  }
+
+  const copyMagnet = async () => {
+    if (!current) return
+    try {
+      await navigator.clipboard.writeText(current.magnet)
+      setStreamMsg('Magnet copiado al portapapeles.')
+    } catch (e) {
+      setStreamMsg(`No se pudo copiar el magnet: ${String(e)}`)
     }
   }
 
@@ -272,11 +312,12 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     { key: 'b', hint: '', run: goBack },
     { key: 'Escape', hint: 'Volver', run: goBack },
   ]
-  // Cuando cualquier modal (subs sheet, diálogo de subs o el prompt de
-  // resume) está abierto, sus hotkeys locales toman el control y las de
-  // la vista se desactivan para no disparar handlers dobles.
+  // Cuando cualquier modal (subs sheet, diálogo de subs, prompt de
+  // resume o menú contextual) está abierto, sus hotkeys locales toman
+  // el control y las de la vista se desactivan para no disparar
+  // handlers dobles.
   useHotkeys(hotkeys, [current, stream, pendingSubPath, backTo], {
-    enabled: !subsOpen && !askSubsOpen && !resumePrompt,
+    enabled: !subsOpen && !askSubsOpen && !resumePrompt && !menu,
   })
 
   const label = result?.title
@@ -289,7 +330,10 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     <div className="flex h-[100dvh] flex-col bg-canvas">
       <TopNav>
         {pendingSubPath && (
-          <span className="rounded-full border border-good/40 bg-good/10 px-3 py-1 text-[12px] text-good">
+          <span
+            className="rounded-full border border-good/40 bg-good/10 px-3 py-1 text-[12px] text-good"
+            title={pendingSubRelease ?? undefined}
+          >
             Sub listo
           </span>
         )}
@@ -358,6 +402,10 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
                     // Un solo clic lanza el flujo (pregunta subs → stream).
                     // Los power-users siguen usando j/k + Enter con teclado.
                     startStreamFlow()
+                  }}
+                  onContextMenu={(x, y) => {
+                    setSel(i)
+                    setMenu({ x, y, index: i })
                   }}
                 />
               ))}
@@ -428,6 +476,54 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           onClose={() => setResumePrompt(null)}
         />
       )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={((): ContextMenuItem[] => {
+            const t = torrents[menu.index]
+            if (!t) return []
+            const hasSub = pendingSubPath !== null
+            return [
+              {
+                label: hasSub
+                  ? 'Proyectar en VLC (con sub cargado)'
+                  : 'Proyectar en VLC',
+                hint: '↵',
+                onClick: startStreamFlow,
+              },
+              {
+                label: 'Abrir en cliente de torrents',
+                hint: 's',
+                onClick: goMagnet,
+              },
+              {
+                label: 'Copiar magnet',
+                onClick: () => {
+                  void copyMagnet()
+                },
+              },
+              {
+                label: hasSub
+                  ? 'Cambiar subtítulos…'
+                  : 'Elegir subtítulos…',
+                onClick: openSubs,
+              },
+              ...(hasSub
+                ? [
+                    {
+                      label: 'Quitar subtítulos',
+                      destructive: true,
+                      onClick: clearPendingSub,
+                    },
+                  ]
+                : []),
+            ]
+          })()}
+        />
+      )}
     </div>
   )
 }
@@ -439,17 +535,23 @@ const TorrentRow = ({
   t,
   active,
   onClick,
+  onContextMenu,
 }: {
   ref: (el: HTMLLIElement | null) => void
   t: Torrent
   active: boolean
   onClick: () => void
+  onContextMenu: (x: number, y: number) => void
 }) => {
   const flag = audioFlag(t.audio)
   return (
     <li
       ref={ref}
       onClick={onClick}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        onContextMenu(e.clientX, e.clientY)
+      }}
       className={`grid cursor-pointer grid-cols-[3rem_1fr_5rem_4.5rem_4.5rem_4rem_4rem_5rem] items-center gap-x-3 border-t border-hairline-soft px-4 py-2.5 text-[13px] transition-colors ${
         active ? 'bg-surface-hi text-ink' : 'text-body hover:bg-surface'
       }`}

@@ -40,6 +40,13 @@ pub struct Preferences {
     /// el directorio entero. Rango efectivo 1–365; 0 se trata como 1.
     #[serde(default = "default_stream_cache_ttl_days")]
     pub stream_cache_ttl_days: u32,
+    /// Opacidad del "liquid glass" (0..=100). 0 = superficies muy
+    /// transparentes (look por defecto), 100 = superficies casi
+    /// sólidas para máxima legibilidad. El frontend interpreta este
+    /// valor como el peso alfa de un fondo oscuro que se aplica
+    /// encima del gradiente de `.glass`/`.glass-strong`/`.popover`.
+    #[serde(default = "default_glass_opacity")]
+    pub glass_opacity: u8,
 }
 
 fn default_min_rating() -> f32 {
@@ -54,6 +61,9 @@ fn default_subtitle_languages() -> String {
 fn default_stream_cache_ttl_days() -> u32 {
     7
 }
+fn default_glass_opacity() -> u8 {
+    0
+}
 
 impl Default for Preferences {
     fn default() -> Self {
@@ -62,6 +72,7 @@ impl Default for Preferences {
             default_count: default_count(),
             subtitle_languages: default_subtitle_languages(),
             stream_cache_ttl_days: default_stream_cache_ttl_days(),
+            glass_opacity: default_glass_opacity(),
         }
     }
 }
