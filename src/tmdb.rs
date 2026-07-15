@@ -196,6 +196,7 @@ impl<'a> TmdbClient<'a> {
     /// GUI para mostrar una pantalla intermedia con posters cuando el user
     /// teclea una query imprecisa, antes de disparar la búsqueda de
     /// torrents. Ordenado por popularidad tal cual lo devuelve TMDB.
+    #[cfg(feature = "gui")]
     pub async fn search_movies(&self, query: &str) -> Result<Vec<TmdbMovie>> {
         let q = query.trim();
         if q.is_empty() {

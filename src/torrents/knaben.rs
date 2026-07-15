@@ -81,7 +81,11 @@ impl TorrentProvider for Knaben {
 
         let mut merged: Vec<KnabenHit> = Vec::new();
         let mut seen = std::collections::HashSet::<String>::new();
-        for hit in exact.into_iter().flatten().chain(fuzzy.into_iter().flatten()) {
+        for hit in exact
+            .into_iter()
+            .flatten()
+            .chain(fuzzy.into_iter().flatten())
+        {
             // Dedup por hash (o por título si el hash no vino).
             let key = hit
                 .hash

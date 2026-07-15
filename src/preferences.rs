@@ -54,8 +54,7 @@ pub fn load() -> Preferences {
 
 pub fn save(prefs: &Preferences) -> Result<()> {
     let path = preferences_path()?;
-    let json = serde_json::to_string_pretty(prefs)
-        .context("Error al serializar preferencias")?;
+    let json = serde_json::to_string_pretty(prefs).context("Error al serializar preferencias")?;
     std::fs::write(path, json).context("Error al escribir preferences.json")?;
     Ok(())
 }

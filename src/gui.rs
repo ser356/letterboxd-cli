@@ -229,7 +229,10 @@ async fn search_movies_tmdb(
 
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
     let tmdb = TmdbClient::new(&state.http, &bearer);
-    let movies = tmdb.search_movies(&query).await.map_err(|e| e.to_string())?;
+    let movies = tmdb
+        .search_movies(&query)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let providers = torrents::default_providers();
     let http = state.http.clone();
