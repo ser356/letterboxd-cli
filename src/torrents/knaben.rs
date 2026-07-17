@@ -7,10 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    infohash_from_magnet, quality_from_title, release_matches_year, MovieQuery, Torrent,
-    TorrentProvider,
-};
+use super::{infohash_from_magnet, quality_from_title, MovieQuery, Torrent, TorrentProvider};
 
 const BASE: &str = "https://api.knaben.org/v1";
 
@@ -100,24 +97,24 @@ impl TorrentProvider for Knaben {
             }
         }
 
-        // Post-filtro por overlap de tokens (palabras completas, no
-        // substrings — así "Deadly Visitor" no matchea a "Play Dead" por
-        // contener "dead"). Se aplica siempre — imprescindible con
-        // `score` porque devuelve fuzzy matches muy laxos.
-        let mut filtered = filter_by_token_overlap(merged, &q.title);
-
-        // Filtro adicional por año con tolerancia ±1: los releases suelen
-        // llevar el año en el nombre, y para pelis internacionales el año
-        // del scene puede ir 1 año antes o después del que TMDB reporta.
-        if let Some(target) = q.year {
-            filtered.retain(|h| release_matches_year(&h.title, target, 1));
-        }
-
-        Ok(hits_to_torrents(filtered))
+        // Fase 2b: los filtros de título (overlap), año y TV VIVEN
+        // AHORA en `search_all` (ver `mod.rs`), aplicados sobre
+        // `ParsedRelease`. El provider devuelve TODOS los hits
+        // crudos que Knaben nos dio — así todos los providers pasan
+        // por el mismo embudo y no diverge la política. El overlap
+        // por token queda desactivado a propósito: era la fuente
+        // principal de los homónimos que se colaban.
+        Ok(hits_to_torrents(merged))
     }
 }
 
 /// Palabras cortas o vacías que no aportan discriminación. Idiomas: EN + ES.
+///
+/// **Legacy** (Fase 2b): el filtro por overlap de tokens vive ahora
+/// en `search_all` con matching por `title_variants`. Se conservan
+/// `STOPWORDS`, `tokenize` y `filter_by_token_overlap` únicamente
+/// como referencia + tests — no se llaman desde el pipeline vivo.
+#[allow(dead_code)]
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "from", "una", "uno", "unos", "unas", "los", "las", "que", "por",
     "para", "con", "del",
@@ -126,6 +123,7 @@ const STOPWORDS: &[&str] = &[
 /// Tokeniza un título: pasa a minúsculas, parte por cualquier carácter no
 /// alfanumérico (releases scene usan `.` `-` `_` como separadores), y se
 /// queda con tokens de ≥3 caracteres que no sean stopwords.
+#[allow(dead_code)]
 fn tokenize(s: &str) -> std::collections::HashSet<String> {
     s.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -147,6 +145,7 @@ fn tokenize(s: &str) -> std::collections::HashSet<String> {
 ///   falsos positivos en títulos cortos como "Play Dead".
 /// * Título con más tokens → basta con matchear ≥2/3 de ellos. Los títulos
 ///   largos suelen aparecer abreviados en releases.
+#[allow(dead_code)]
 fn filter_by_token_overlap(hits: Vec<KnabenHit>, title: &str) -> Vec<KnabenHit> {
     let needles = tokenize(title);
     if needles.is_empty() {
@@ -179,7 +178,12 @@ async fn knaben_query(
         query: query.to_string(),
         order_by: "seeders",
         order_direction: "desc",
-        size: 40,
+        // Subido a 100 en Fase 2 del audit: con exact + fuzzy y los
+        // filtros centralizados de `search_all` filtrando fuerte
+        // después, 40 dejaba fuera hits legítimos de pelis con
+        // muchos releases (blockbusters). La API acepta hasta 100
+        // sin coste apreciable.
+        size: 100,
         categories: vec![3_000_000],
     };
 
@@ -235,9 +239,77 @@ fn hits_to_torrents(hits: Vec<KnabenHit>) -> Vec<Torrent> {
             seeders,
             leechers,
             quality,
-            source: "knaben",
+            source: "knaben".to_string(),
             infohash,
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(title: &str) -> KnabenHit {
+        KnabenHit {
+            title: title.to_string(),
+            seeders: Some(10),
+            peers: Some(0),
+            bytes: Some(1024 * 1024 * 1024),
+            magnet_url: Some(format!(
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn={}",
+                urlencoding::encode(title)
+            )),
+            hash: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            tracker: None,
+        }
+    }
+
+    #[test]
+    fn overlap_short_title_requires_full_match() {
+        // "Play Dead" tiene 2 tokens significativos → need_all.
+        let hits = vec![
+            hit("Play.Dead.2022.1080p.BluRay.x264"),
+            hit("Deadly.Visitor.2018.1080p"), // solo "dead" (substring, no token)
+            hit("Play.Time.2020.1080p"),      // solo "play"
+        ];
+        let filtered = filter_by_token_overlap(hits, "Play Dead");
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].title.starts_with("Play.Dead"));
+    }
+
+    #[test]
+    fn overlap_short_title_survives_when_all_tokens_stopwords() {
+        // "It" y "Up" no dejan needles significativos → aceptamos todo
+        // (el filtro por año/seeders/dedup hace el resto).
+        let hits = vec![hit("Anything.2020.1080p"), hit("Whatever.2019.720p")];
+        let filtered = filter_by_token_overlap(hits, "It");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn overlap_long_title_tolerates_partial_match() {
+        // "The Lord of the Rings Fellowship of the Ring" → tras
+        // stopwords/short → {"lord", "rings", "fellowship", "ring"}
+        // → 4 tokens → threshold = 4*2/3 = 2.
+        let hits = vec![
+            hit("The.Lord.of.the.Rings.Fellowship.1080p"), // {lord, rings, fellowship} → 3/4 ✓
+            hit("Fellowship.Ring.2001.1080p"),             // {fellowship, ring} → 2/4 ✓
+            hit("Lord.of.War.2005.1080p"),                 // {lord} → 1/4 ✗
+        ];
+        let filtered =
+            filter_by_token_overlap(hits, "The Lord of the Rings Fellowship of the Ring");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn overlap_uses_word_boundaries_not_substrings() {
+        // "Dead" (needle) NO debe matchear "deadly" (token del hit)
+        // porque tokenize parte por caracteres no alfanuméricos, no
+        // hace substring search. Este comportamiento es lo que salva
+        // "Play Dead" de matchear "Deadly Visitor" en el primer test.
+        let a: std::collections::HashSet<String> = tokenize("Play Dead");
+        let b: std::collections::HashSet<String> = tokenize("Deadly.Visitor");
+        assert_eq!(a.intersection(&b).count(), 0);
+    }
 }

@@ -7,8 +7,8 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  *
  * Se muestra solo cuando la caché de streams tiene un `resume.json`
  * para el infohash del magnet Y conocemos el runtime de TMDB (para
- * convertir la fracción a segundos y pasarlos como `--start-time` a
- * VLC). En búsquedas directas no aparece porque runtime es `null`.
+ * convertir la fracción a segundos y pasarlos al reproductor).
+ * En búsquedas directas no aparece porque runtime es `null`.
  *
  * Foco entre botones con `←/→`. `Enter` confirma. `R` reanuda, `Z`
  * empieza de cero. `Esc` cancela y no arranca stream.
@@ -89,7 +89,7 @@ export function ResumeDialog({
               Reanudar
             </span>
             <span className="text-[11px] text-muted">
-              VLC arranca en {stamp}
+              Salta a {stamp}
             </span>
           </button>
 

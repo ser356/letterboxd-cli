@@ -6,6 +6,7 @@ import { getPreferences, isTauri } from './lib/api'
 import { applyGlassOpacity } from './lib/theme'
 import { Home } from './views/Home'
 import { Login } from './views/Login'
+import { Player } from './views/Player'
 import { Recommendations } from './views/Recommendations'
 import { Search } from './views/Search'
 import { SearchResults } from './views/SearchResults'
@@ -34,6 +35,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/settings" element={<Settings />} />
         <Route path="/torrents/tmdb/:tmdbId" element={<Torrents mode="tmdb" />} />
         <Route path="/torrents/search" element={<Torrents mode="direct" />} />
+        <Route path="/player" element={<Player />} />
       </Routes>
     </BrowserRouter>
   </StrictMode>,

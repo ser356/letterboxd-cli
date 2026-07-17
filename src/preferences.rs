@@ -24,11 +24,6 @@ pub struct Preferences {
     /// Rating mínimo por defecto en la vista Recs (0.5 – 5.0).
     #[serde(default = "default_min_rating")]
     pub default_min_rating: f32,
-    /// Número de recomendaciones por defecto. Alineado con la CLI
-    /// (`videodrome recommend` usa 10) — la GUI puede subirlo si el user
-    /// lo cambia en Ajustes.
-    #[serde(default = "default_count")]
-    pub default_count: usize,
     /// Idiomas de subtítulos separados por coma (ISO 639-1). Se pasa a
     /// OpenSubtitles como parámetro `languages`.
     #[serde(default = "default_subtitle_languages")]
@@ -47,13 +42,28 @@ pub struct Preferences {
     /// encima del gradiente de `.glass`/`.glass-strong`/`.popover`.
     #[serde(default = "default_glass_opacity")]
     pub glass_opacity: u8,
+    /// Reproductor por defecto al pulsar Enter/play sobre un torrent.
+    /// `Html` usa el player embebido (view `Player.tsx`, requiere
+    /// ffmpeg en PATH); `Vlc` mantiene la ruta legacy que abre VLC
+    /// como proceso externo. El clic derecho sobre un torrent siempre
+    /// ofrece "Abrir en VLC" como escape hatch independientemente de
+    /// esta preferencia.
+    #[serde(default = "default_player")]
+    pub default_player: PlayerKind,
+}
+
+/// Reproductor que la GUI usa por defecto. Serializado como string
+/// en el JSON de preferencias para que sea legible a ojo (`"html"` /
+/// `"vlc"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlayerKind {
+    Html,
+    Vlc,
 }
 
 fn default_min_rating() -> f32 {
     4.0
-}
-fn default_count() -> usize {
-    10
 }
 fn default_subtitle_languages() -> String {
     crate::subtitles::DEFAULT_LANGUAGES.to_string()
@@ -65,14 +75,18 @@ fn default_glass_opacity() -> u8 {
     0
 }
 
+fn default_player() -> PlayerKind {
+    PlayerKind::Html
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             default_min_rating: default_min_rating(),
-            default_count: default_count(),
             subtitle_languages: default_subtitle_languages(),
             stream_cache_ttl_days: default_stream_cache_ttl_days(),
             glass_opacity: default_glass_opacity(),
+            default_player: default_player(),
         }
     }
 }

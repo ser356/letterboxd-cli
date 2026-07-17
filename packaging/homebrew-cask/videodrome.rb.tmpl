@@ -22,7 +22,7 @@ cask "videodrome" do
 
   url "https://github.com/{{REPO}}/releases/download/{{TAG}}/videodrome-{{TAG}}-macos-arm64.zip"
   name "Videodrome"
-  desc "Recomendaciones Letterboxd + streaming BitTorrent en VLC"
+  desc "Recomendaciones Letterboxd + streaming BitTorrent con player embebido"
   homepage "https://github.com/{{REPO}}"
 
   # arm64 only — los runners macos-13 Intel de Actions están deprecated.
@@ -30,7 +30,13 @@ cask "videodrome" do
   # Homebrew acepta un símbolo suelto como versión mínima; el formato
   # string ">= :catalina" quedó deprecated en 2025+.
   depends_on macos: :catalina
-  depends_on cask: "vlc"
+  # ffmpeg = dependencia REAL. El player HTML embebido lo usa para
+  # transmux (MKV/HEVC/VP9 → fMP4 fragmentado sobre HLS) y no arranca
+  # sin él. VLC ya no es dependencia forzada — quedaba como fallback
+  # externo cuando el player embebido no existía, pero desde
+  # v0.4.x el default es el embebido y VLC es opt-in desde Ajustes.
+  # Si el user lo quiere, se instala aparte con `brew install --cask vlc`.
+  depends_on formula: "ffmpeg"
 
   app "Videodrome.app"
 
@@ -65,6 +71,11 @@ cask "videodrome" do
       videodrome recommend
       videodrome tui
       videodrome torrents "Alien" --year 1979
+
+    Reproductor: por defecto usa el player embebido (requiere el
+    formula `ffmpeg`, que se instala como dependencia). Si prefieres
+    VLC externo, instálalo aparte con `brew install --cask vlc` y
+    cambia el reproductor en Ajustes.
 
     Requiere sesión Letterboxd la primera vez (login desde la GUI o
     variables de entorno).

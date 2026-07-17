@@ -21,6 +21,10 @@ export interface Movie {
   popularity: number
   release_date: string | null
   poster_path: string | null
+  /// Presente en hits de Cinemeta (fallback anti-caída de TMDB). Cuando
+  /// `id === 0` este campo lleva el IMDb id y la GUI enruta por texto
+  /// directo en vez de por TMDB.
+  imdb_id?: string | null
 }
 
 export interface Recommendation {
@@ -66,6 +70,31 @@ export interface TorrentSearchResult {
    * directas (sin TMDB) o si TMDB no lo expone. */
   runtime_minutes: number | null
   results: Torrent[]
+  /** Estado por provider (Fase 1b — observabilidad). Vacío en modos
+   * legacy o cuando la respuesta viene 100 % de caché (Fase 4). */
+  providers?: ProviderStatus[]
+  /** Fecha de estreno TMDB (`YYYY-MM-DD`). Fase 4b: la vista Torrents
+   * la usa para pintar "Estrenada en cines el X — sin releases
+   * digitales todavía" cuando `results` está vacío y el estreno es
+   * reciente / futuro. `null` en búsquedas directas o si TMDB no la
+   * expone. */
+  release_date?: string | null
+}
+
+/** Espejo de `torrents::ProviderStatus` del backend. La UI pinta una
+ * línea discreta tipo `knaben ✓ 34 · apibay ✗ timeout · yts ✓ 5` para
+ * que el usuario vea si la lista corta viene de filtros o de un
+ * provider caído. `error` solo llega con `ok = false`. */
+export interface ProviderStatus {
+  name: string
+  ok: boolean
+  hits: number
+  elapsed_ms: number
+  error?: string | null
+  retried: boolean
+  /** `true` si el resultado se sirvió del caché en disco (Fase 4a).
+   * La UI pinta `↺` en vez de `✓`. */
+  from_cache?: boolean
 }
 
 export interface StreamInfo {
@@ -89,6 +118,9 @@ export interface Subtitle {
   downloads: number
   rating: number
   hearing_impaired: boolean
+  /** Verificado por moderador de OpenSubtitles. La UI le pinta un
+   * badge y sube en el orden dentro del idioma. */
+  from_trusted: boolean
   file_name: string | null
 }
 
@@ -102,27 +134,50 @@ export const logout = () => invoke<void>('logout')
 
 // -------- Recommendations --------
 
-export const getRecommendations = (count: number, minRating: number) =>
-  invoke<Recommendation[]>('get_recommendations', { count, minRating })
+/** Página de recomendaciones para el scroll infinito de la view Recs. */
+export interface RecsPage {
+  items: Recommendation[]
+  /** `true` si quedan más elementos: el frontend puede pedir la
+   * siguiente página con `offset += limit`. */
+  has_more: boolean
+  /** Nº total de recs disponibles (post-filtro de dismissed). */
+  total: number
+}
+
+/**
+ * Sirve una página del pool cacheado de recomendaciones. El primer
+ * hit (o cuando `forceRefresh = true` o cambia `minRating`) computa el
+ * pool entero (RECS_POOL_SIZE en backend, ~200 items) y las siguientes
+ * llamadas devuelven slices sin volver a pegar a TMDB/Letterboxd.
+ */
+export const getRecommendationsPage = (
+  offset: number,
+  limit: number,
+  minRating: number,
+  forceRefresh = false,
+) =>
+  invoke<RecsPage>('get_recommendations_page', {
+    offset,
+    limit,
+    minRating,
+    forceRefresh,
+  })
 
 export const getMovieView = (tmdbId: number) =>
   invoke<MovieView | null>('get_movie_view', { tmdbId })
 
-/** Marca una película como "no sugerir" y devuelve la lista fresca del
- * mismo tamaño (`count`) — el UI la sustituye en caliente sin recargar. */
+/** Marca una película como "no sugerir". El servidor solo persiste el
+ * dismissed store; el frontend elimina localmente y la próxima página
+ * del scroll infinito la filtrará. */
 export const dismissRecommendation = (
   tmdbId: number,
   title: string,
   posterPath: string | null,
-  count: number,
-  minRating: number,
 ) =>
-  invoke<Recommendation[]>('dismiss_recommendation', {
+  invoke<void>('dismiss_recommendation', {
     tmdbId,
     title,
     posterPath,
-    count,
-    minRating,
   })
 
 export const undismissRecommendation = (tmdbId: number) =>
@@ -154,9 +209,10 @@ export const searchTorrentsByTmdb = (
 export const searchTorrentsDirect = (query: string) =>
   invoke<TorrentSearchResult>('search_torrents_direct', { query })
 
-/** Hit de TMDB anotado con el número de torrents disponibles. Los hits
- * sin torrents se filtran en el backend, así que aquí todos tienen
- * `torrent_count >= 1`. */
+/** Hit de TMDB anotado con el número de torrents disponibles. El
+ * backend NO filtra por torrent_count > 0, así que este campo puede
+ * ser 0: la peli aparecerá en el catálogo y la vista de Torrents
+ * mostrará un mensaje adecuado si no hay resultados. */
 export interface MovieHit extends Movie {
   torrent_count: number
 }
@@ -180,20 +236,106 @@ export const startStreamWithSub = (
     resumeSeconds,
   })
 
+/** Arranca el stream en modo player HTML: solo librqbit + HTTP server,
+ * no spawnea VLC. La URL devuelta apunta a `/video` (raw file); si
+ * `direct_playable=true` el player la usa tal cual, si no consume
+ * `/hls/playlist.m3u8` (véase `hlsUrl`). */
+export const startStreamHtml = (magnet: string) =>
+  invoke<StreamInfo>('start_stream_html', { magnet })
+
+/** `true` si ffmpeg + ffprobe están en PATH. */
+export const ffmpegAvailable = () => invoke<boolean>('ffmpeg_available')
+
+// Info que devuelve `/probe.json` del servidor local. Es lo que
+// ffprobe reporta sobre el input: contenedor, duración y streams.
+// El player HTML lo usa para saber la duración (video.duration es
+// Infinity con streams chunked) y para poblar los menús de audio/subs.
+export interface MediaInfo {
+  duration_seconds: number | null
+  container: string | null
+  streams: MediaStream[]
+  /** `true` si el frontend puede apuntar `<video src>` a `/video` raw
+   * (WKWebView/WebView2 decodifican directamente). Cuando es `false`
+   * el player pasa por ffmpeg vía `/hls/playlist.m3u8`. */
+  direct_playable: boolean
+}
+
+export interface MediaStream {
+  index: number
+  kind: 'video' | 'audio' | 'subtitle' | 'other'
+  codec: string
+  language: string | null
+  title: string | null
+  width: number | null
+  height: number | null
+}
+
+/** Consulta el endpoint `/probe.json` del stream local. `streamUrl` es
+ * la URL que devuelve `start_stream_html` (que apunta a `/video`);
+ * probe se sirve desde el mismo host/port. */
+export async function probeStream(streamUrl: string): Promise<MediaInfo> {
+  const base = streamUrl.replace(/\/video$/, '')
+  const r = await fetch(`${base}/probe.json`)
+  if (!r.ok) throw new Error(`probe ${r.status}`)
+  return (await r.json()) as MediaInfo
+}
+
+/** URL del playlist HLS. Es un playlist VOD ESTÁTICO — función pura
+ * de la duración de la peli (enumera todos los segmentos desde
+ * arranque con `#EXT-X-ENDLIST`). El backend materializa los `.ts`
+ * bajo demanda cuando el `<video>` los pide.
+ *
+ * Sin query params: la URL es estable durante toda la vida del
+ * stream, así que WKWebView puede cachear libremente. El seek al
+ * offset inicial de resume se hace en el frontend con
+ * `v.currentTime = t` tras `loadedmetadata`, no en la URL.
+ */
+export function hlsUrl(streamUrl: string): string {
+  const base = streamUrl.replace(/\/video$/, '')
+  return `${base}/hls/playlist.m3u8`
+}
+
 export const streamStats = (id: number) =>
   invoke<StreamStats>('stream_stats', { id })
 
 export const stopStream = (id: number) => invoke<void>('stop_stream', { id })
 
 /** Estado de resume persistido para un magnet, si su infohash tiene
- * caché. `fraction` en [0, 1]. */
+ * caché. Puede llegar en dos formas:
+ *
+ *   * `seconds` + `duration_seconds` — reportado por el player HTML
+ *     mientras reproducía. Preferido: no necesita `runtime_minutes`
+ *     para convertir a tiempo (funciona en modo direct y en
+ *     búsquedas sin TMDB).
+ *   * `fraction` — byte-based, escrito por el Drop del stream cuando
+ *     se cierra (path VLC y compat con caché legacy). El caller lo
+ *     multiplica por `runtime_minutes × 60` para sacar segundos.
+ *
+ * Ambos campos pueden coexistir; el frontend prefiere `seconds`. */
 export interface Resume {
   fraction: number
+  seconds: number | null
+  duration_seconds: number | null
   updated_at: number
 }
 
 export const getResume = (magnet: string) =>
   invoke<Resume | null>('get_resume', { magnet })
+
+/** Reporta la posición absoluta del `<video>` al backend para que la
+ * persista en `resume.json`. Se invoca cada ~15s durante la
+ * reproducción y en el cleanup del player. Si `seconds/duration_seconds`
+ * supera el 95%, el backend borra el resume (peli terminada). */
+export const reportPosition = (
+  streamId: number,
+  seconds: number,
+  durationSeconds: number,
+) =>
+  invoke<void>('report_position', {
+    streamId,
+    seconds,
+    durationSeconds,
+  })
 
 // -------- Subtitles --------
 
@@ -201,11 +343,13 @@ export const subtitlesAvailable = () =>
   invoke<boolean>('subtitles_available')
 
 export const searchSubtitles = (
+  streamId: number | null,
   imdbId: string | null,
   query: string | null,
   languages?: string,
 ) =>
   invoke<Subtitle[]>('search_subtitles', {
+    streamId,
     imdbId,
     query,
     languages,
@@ -214,10 +358,25 @@ export const searchSubtitles = (
 export const downloadSubtitle = (sub: Subtitle) =>
   invoke<string>('download_subtitle', { sub })
 
+/** Convierte un `.srt` local a WebVTT (string). El player HTML lo
+ * usa como `<track>` vía blob URL — WKWebView/WebView2 no cargan
+ * `.srt` nativamente. */
+export const subtitleToVtt = (path: string) =>
+  invoke<string>('subtitle_to_vtt', { path })
+
 // -------- Ajustes: caché + preferencias --------
 
 export interface CacheEntry {
-  kind: 'log_entries' | 'watchlist' | 'tmdb_recs' | 'search' | 'streams'
+  kind:
+    | 'log_entries'
+    | 'watchlist'
+    | 'tmdb_recs'
+    | 'search'
+    | 'torrent_search'
+    | 'streams'
+    | 'tmdb_search'
+    | 'tmdb_view'
+    | 'tmdb_details'
   label: string
   path: string
   exists: boolean
@@ -227,13 +386,17 @@ export interface CacheEntry {
 
 export interface Preferences {
   default_min_rating: number
-  default_count: number
   subtitle_languages: string
   /** TTL de la caché de streams en días (auto-prune al arrancar). */
   stream_cache_ttl_days: number
   /** Opacidad del "liquid glass" (0..=100). 0 = default translúcido,
    * 100 = superficies casi sólidas para máxima legibilidad. */
   glass_opacity: number
+  /** Reproductor por defecto: `html` = player embebido (requiere
+   * ffmpeg en PATH), `vlc` = ruta legacy con VLC como proceso
+   * externo. El clic derecho sobre un torrent siempre ofrece
+   * "Abrir en VLC" como escape hatch. */
+  default_player: 'html' | 'vlc'
 }
 
 export const cacheInfo = () => invoke<CacheEntry[]>('cache_info')
@@ -249,14 +412,20 @@ export function tmdbPoster(
   path: string | null,
   size: 'w342' | 'w500' | 'w780' = 'w500',
 ): string | null {
-  return path ? `https://image.tmdb.org/t/p/${size}${path}` : null
+  if (!path) return null
+  // Fallback de Cinemeta: viene una URL absoluta ya lista para usar
+  // (imágenes de metahub, etc.). No prependemos el CDN de TMDB.
+  if (/^https?:\/\//i.test(path)) return path
+  return `https://image.tmdb.org/t/p/${size}${path}`
 }
 
 export function tmdbBackdrop(
   path: string | null,
   size: 'w780' | 'w1280' | 'original' = 'w1280',
 ): string | null {
-  return path ? `https://image.tmdb.org/t/p/${size}${path}` : null
+  if (!path) return null
+  if (/^https?:\/\//i.test(path)) return path
+  return `https://image.tmdb.org/t/p/${size}${path}`
 }
 
 export function formatSize(bytes: number): string {

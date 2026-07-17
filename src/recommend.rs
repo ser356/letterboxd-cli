@@ -101,7 +101,40 @@ pub async fn build_recommendations<P: Progress>(
     min_rating: f32,
     progress: &P,
 ) -> Result<Vec<Recommendation>> {
-    // ── 1. Historial + watchlist ────────────────────────────────────────────
+    // Fast path para callers que quieren todo de una vez (CLI/TUI):
+    // build_candidate_pool → enrich_batch(count * 3) → sort → truncate.
+    // La GUI usa las dos funciones por separado para servir por páginas.
+    let candidates =
+        build_candidate_pool(lb_client, tmdb_client, min_rating, count * 3, progress).await?;
+    let fetch_count = (count * 3).min(candidates.len());
+    let slice = &candidates[..fetch_count];
+    progress.stage("Obteniendo ratings de Letterboxd…", fetch_count as u64);
+    let mut scored = enrich_batch(lb_client, slice, Some(progress)).await;
+    progress.finish();
+    scored.sort_unstable_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(count);
+    Ok(scored)
+}
+
+/// Pipeline steps 1-3: historial Letterboxd + recomendaciones TMDB +
+/// pre-score por freq × TMDB. Devuelve la lista de candidatos ya
+/// ordenada, lista para que `enrich_batch` la consuma por trozos.
+///
+/// `cap` limita cuántos candidatos se retienen (los mejores por
+/// pre-score); el resto se descartan sin ir a Letterboxd. Es el
+/// techo real del scroll infinito — si el user llega al final es
+/// porque ya no hay más candidatos plausibles.
+pub async fn build_candidate_pool<P: Progress>(
+    lb_client: &LetterboxdClient<'_>,
+    tmdb_client: &TmdbClient<'_>,
+    min_rating: f32,
+    cap: usize,
+    progress: &P,
+) -> Result<Vec<(TmdbMovie, f32)>> {
     progress.stage("Cargando historial…", 0);
     let (entries, watchlist) =
         tokio::try_join!(lb_client.get_log_entries(), lb_client.get_watchlist())?;
@@ -109,7 +142,6 @@ pub async fn build_recommendations<P: Progress>(
 
     let (seen, seeds) = compute_seen_and_seeds(&entries, &watchlist, min_rating);
 
-    // ── 2. Recomendaciones TMDB (en paralelo, con caché) ────────────────────
     let mut candidate_movies: HashMap<u64, TmdbMovie> = HashMap::new();
     let mut freq: HashMap<u64, u32> = HashMap::new();
 
@@ -141,18 +173,28 @@ pub async fn build_recommendations<P: Progress>(
     progress.finish();
     tmdb_client.save_cache();
 
-    // Pre-selección por freq × TMDB — drena `candidate_movies`, así que las
-    // películas descartadas se sueltan sin recorrer el map una segunda vez.
-    let fetch_count = (count * 3).min(candidate_movies.len());
-    let candidates = pre_score_candidates(candidate_movies, &freq, fetch_count);
+    let fetch_count = cap.min(candidate_movies.len());
+    Ok(pre_score_candidates(candidate_movies, &freq, fetch_count))
+}
 
-    // ── 3. Ratings de Letterboxd (en paralelo) → re-score final ─────────────
-    progress.stage("Obteniendo ratings de Letterboxd…", fetch_count as u64);
-
-    let mut scored: Vec<Recommendation> = stream::iter(candidates)
+/// Pipeline step 4 aplicado a un batch: pide ratings LB para cada
+/// candidato en paralelo, ordena por score final DESC. No trunca —
+/// el caller decide cuántos servir.
+///
+/// `progress` es opcional para no ensuciar la UX de la GUI (donde
+/// mostramos un spinner, no una progress bar). La CLI lo pasa
+/// siempre para que la barra avance por batch.
+pub async fn enrich_batch<P: Progress>(
+    lb_client: &LetterboxdClient<'_>,
+    candidates: &[(TmdbMovie, f32)],
+    progress: Option<&P>,
+) -> Vec<Recommendation> {
+    let mut scored: Vec<Recommendation> = stream::iter(candidates.iter().cloned())
         .map(|(movie, f)| async move {
             let lb_rating = lb_client.get_lb_rating(movie.id).await;
-            progress.inc();
+            if let Some(p) = progress {
+                p.inc();
+            }
             let score = final_score(lb_rating, f, movie.vote_average);
             Recommendation {
                 movie,
@@ -163,16 +205,12 @@ pub async fn build_recommendations<P: Progress>(
         .buffer_unordered(LB_CONCURRENCY)
         .collect()
         .await;
-    progress.finish();
-
     scored.sort_unstable_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    scored.truncate(count);
-
-    Ok(scored)
+    scored
 }
 
 #[cfg(test)]
@@ -208,6 +246,7 @@ mod tests {
             popularity: 0.0,
             release_date: None,
             poster_path: None,
+            imdb_id: None,
         }
     }
 

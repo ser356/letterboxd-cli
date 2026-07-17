@@ -1,7 +1,8 @@
 # videodrome
 
 Recomendaciones basadas en tu historial de Letterboxd, búsqueda de
-torrents en varios providers y streaming BitTorrent integrado en VLC.
+torrents en varios providers y streaming BitTorrent con player
+embebido (HLS + hls.js) o VLC externo como fallback.
 
 App de escritorio (Tauri + React) y CLI/TUI en el **mismo binario**:
 doble click abre la GUI, subcomandos por terminal ejecutan la CLI.
@@ -27,10 +28,13 @@ brew tap ser356/cask https://github.com/ser356/homebrew-cask
 brew install --cask videodrome
 ```
 
-VLC entra automáticamente como dependencia. La app lleva **firma
-ad-hoc** (no está firmada con Developer ID de Apple), pero el cask
-limpia `com.apple.quarantine` en postinstall — abre con doble click sin
-más pasos.
+`ffmpeg` entra automáticamente como dependencia (lo usa el player
+embebido para transmux). Si prefieres también VLC externo como
+fallback: `brew install --cask vlc`.
+
+La app lleva **firma ad-hoc** (no está firmada con Developer ID de
+Apple), pero el cask limpia `com.apple.quarantine` en postinstall —
+abre con doble click sin más pasos.
 
 Si por lo que sea sigue bloqueada:
 
@@ -48,26 +52,49 @@ En PowerShell **no admin**:
 irm https://ser356.github.io/videodrome/install.ps1 | iex
 ```
 
-Instala Scoop si falta, añade los buckets `extras` (VLC) y `ser356`, y
-descarga el binario prebuilt.
+Instala Scoop si falta, añade el bucket `ser356`, y descarga el
+binario prebuilt. `ffmpeg` viene del bucket `main` por defecto (no
+hace falta añadirlo). VLC ya no es dependencia obligatoria — el
+player embebido no lo necesita.
 
 Flujo manual si ya tienes Scoop:
 
 ```powershell
-scoop bucket add extras
 scoop bucket add ser356 https://github.com/ser356/scoop-bucket
 scoop install ser356/videodrome
 ```
 
+Si quieres VLC como fallback externo:
+
+```powershell
+scoop bucket add extras
+scoop install extras/vlc
+```
+
 Actualizar: `scoop update videodrome`.
+
+Si prefieres winget:
+
+```powershell
+winget install Gyan.FFmpeg
+# opcional (solo si quieres el fallback externo):
+winget install VideoLAN.VLC
+```
+
+Notas específicas de Windows (mirrors YTS bloqueados por ISP,
+extensión HEVC opcional, checklist de smoke test, resolución de
+problemas) en [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ### Linux · tarball CLI
 
 ```bash
-curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v0.4.4-linux-x86_64.tar.gz | tar -xz
+curl -sL https://github.com/ser356/videodrome/releases/latest/download/videodrome-v1.0.0-linux-x86_64.tar.gz | tar -xz
 sudo mv videodrome /usr/local/bin/
-sudo apt install vlc  # o el gestor que uses
+sudo apt install ffmpeg  # o el gestor que uses (dnf/pacman)
 ```
+
+Opcional: `sudo apt install vlc` si quieres el player externo como
+fallback.
 
 ### Compilar desde código
 
@@ -163,7 +190,23 @@ infohash):
 - **Knaben** (`api.knaben.org`) — agregador 1337x, TPB, TorrentGalaxy,
   YTS, Nyaa, RuTracker…
 - **Torznab** — opt-in. Se activa si defines `TORZNAB_URL` +
-  `TORZNAB_APIKEY` (Jackett / Prowlarr).
+  `TORZNAB_APIKEY` (Jackett / Prowlarr). Preferimos `t=movie&imdbid=`
+  cuando el indexer lo soporta; fallback silencioso a `t=search` para
+  configuraciones antiguas.
+
+Cada provider tiene un presupuesto de 8 s por búsqueda y un
+reintento único (backoff 500 ms) solo para errores de transporte. El
+estado por provider (`ok`/`error`, número de hits, latencia) se
+expone en la GUI como línea discreta bajo el título y sirve como
+telemetría honesta cuando la lista queda corta.
+
+Matching de releases: la GUI construye hasta 3 variantes de título
+(original, inglés, alternativa de TMDB) y las lanza en paralelo. El
+filtrado central de `search_all` parsea cada release con un parser
+estructurado (`release_name::parse`) — el título, el año, la
+temporada/episodio, la resolución, el source y el codec salen como
+campos tipados. Se descartan series (SxxEyy), CAMs / screeners y
+releases cuyo `parsed.title` normalizado no matchea ninguna variante.
 
 Ranking: `seeders × calidad × idioma`. La calidad prioriza 2160p >
 1080p > 720p. El idioma promociona releases con el audio original de
@@ -194,6 +237,13 @@ Streaming: `s` arranca `librqbit` en un tempdir, sirve el fichero más
 grande vía HTTP local (soporte `Range`) y abre VLC apuntando a esa URL.
 Descarga secuencial priorizada por el player. Al salir de la TUI se
 cancela y borra todo el temporal.
+
+En la GUI el player por defecto es **embebido en la propia app**:
+`<video>` HTML alimentado por `ffmpeg` en modo transmux (fMP4 fragmentado).
+Los subtítulos se convierten SRT→WebVTT sobre la marcha. Requiere `ffmpeg`
+y `ffprobe` en PATH — los packagers oficiales (Homebrew cask, Scoop) los
+declaran como dependencia. Si prefieres VLC externo hay un toggle en
+Preferences y siempre queda "Abrir en VLC" como opción por clic derecho.
 
 #### `keychain` (solo macOS)
 
@@ -258,7 +308,8 @@ En `~/.config/videodrome/`:
 | `log_entries.json` | 1 h |
 | `watchlist.json` | 1 h |
 | `tmdb_recs_cache.json` | 24 h |
-| `search_cache.json` | 24 h (búsquedas TMDB + torrents desde la GUI) |
+| `search_cache.json` | 24 h (hits de TMDB por texto en la vista Search) |
+| `torrent_search_cache.json` | 30 min (con torrents) · 5 min (vacío) |
 | `preferences.json` | persistente (defaults de la vista Recs, idiomas de subs) |
 
 Desde la GUI, la vista **Ajustes** permite limpiar cada caché

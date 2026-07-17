@@ -296,17 +296,17 @@ function PreferencesEditor({
   onSave: (p: Preferences) => void
 }) {
   const [rating, setRating] = useState(prefs.default_min_rating)
-  const [count, setCount] = useState(prefs.default_count)
   const [langs, setLangs] = useState(prefs.subtitle_languages)
   const [ttl, setTtl] = useState(prefs.stream_cache_ttl_days)
   const [glass, setGlass] = useState(prefs.glass_opacity)
+  const [player, setPlayer] = useState<'html' | 'vlc'>(prefs.default_player)
 
   const dirty =
     rating !== prefs.default_min_rating ||
-    count !== prefs.default_count ||
     langs.trim() !== prefs.subtitle_languages.trim() ||
     ttl !== prefs.stream_cache_ttl_days ||
-    glass !== prefs.glass_opacity
+    glass !== prefs.glass_opacity ||
+    player !== prefs.default_player
 
   // Preview en vivo del slider de liquid glass: aplicamos la variable
   // CSS al arrastrar aunque el usuario aún no haya pulsado "Guardar".
@@ -329,21 +329,6 @@ function PreferencesEditor({
           step={0.5}
           value={rating}
           onChange={(e) => setRating(Number(e.target.value))}
-          className="focus-ring h-10 w-full rounded-md border border-hairline bg-surface px-3 text-[14px] text-ink"
-        />
-      </Field>
-
-      <Field
-        label="Número de recomendaciones"
-        hint="Cantidad inicial de posters en Cartelera."
-      >
-        <input
-          type="number"
-          min={5}
-          max={100}
-          step={5}
-          value={count}
-          onChange={(e) => setCount(Number(e.target.value))}
           className="focus-ring h-10 w-full rounded-md border border-hairline bg-surface px-3 text-[14px] text-ink"
         />
       </Field>
@@ -395,16 +380,46 @@ function PreferencesEditor({
         </div>
       </Field>
 
+      <Field
+        label="Reproductor"
+        hint="Player embebido dentro de la app o VLC como app externa. El clic derecho sobre un torrent siempre ofrece VLC como escape hatch aunque el default sea embebido."
+      >
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setPlayer('html')}
+            className={`focus-ring h-10 flex-1 rounded-md border text-[13px] transition-colors ${
+              player === 'html'
+                ? 'border-accent bg-accent/15 text-ink'
+                : 'border-hairline bg-surface text-body hover:bg-surface-hi'
+            }`}
+          >
+            Player embebido
+          </button>
+          <button
+            type="button"
+            onClick={() => setPlayer('vlc')}
+            className={`focus-ring h-10 flex-1 rounded-md border text-[13px] transition-colors ${
+              player === 'vlc'
+                ? 'border-accent bg-accent/15 text-ink'
+                : 'border-hairline bg-surface text-body hover:bg-surface-hi'
+            }`}
+          >
+            VLC externo
+          </button>
+        </div>
+      </Field>
+
       <div className="flex items-end justify-end sm:col-span-2">
         <button
           disabled={!dirty || saving}
           onClick={() =>
             onSave({
               default_min_rating: rating,
-              default_count: count,
               subtitle_languages: langs.trim(),
               stream_cache_ttl_days: ttl,
               glass_opacity: glass,
+              default_player: player,
             })
           }
           className="focus-ring h-10 rounded-full bg-accent px-5 text-[13px] font-semibold text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-accent-disabled"

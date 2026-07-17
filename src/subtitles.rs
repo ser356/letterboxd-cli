@@ -49,8 +49,21 @@ pub struct Subtitle {
     pub rating: f32,
     /// Sub con transcripción para sordos (SDH).
     pub hearing_impaired: bool,
+    /// Marcado por OpenSubtitles como "from trusted uploader" — subs
+    /// verificados por moderadores. Suben en el ranking.
+    #[serde(default)]
+    pub from_trusted: bool,
     /// Nombre del fichero (`foo.srt`).
     pub file_name: Option<String>,
+    /// True cuando este sub proviene de una búsqueda por `moviehash`
+    /// (sincronización perfecta con el fichero de vídeo exacto). Lo
+    /// rellena el caller (`gui::search_subtitles`) tras marcar los
+    /// resultados de la vía hash, ANTES de fusionarlos con los de la
+    /// vía `imdb_id`/`query`. Se usa para dedup estable (los
+    /// hash-matches se conservan primero) y — opcionalmente — para
+    /// pintar un badge en el frontend.
+    #[serde(default)]
+    pub hash_match: bool,
 }
 
 /// Devuelve la API key resuelta (env var > baked-in).
@@ -67,17 +80,65 @@ pub fn is_available() -> bool {
     api_key().is_some()
 }
 
-/// Busca subtítulos para una película. Al menos uno de `imdb_id` o
-/// `query` debe estar informado.
+/// Calcula el "OpenSubtitles hash" de un fichero: identificador único
+/// del contenido usado por OpenSubtitles para encontrar subs con
+/// sincronización perfecta.
 ///
+/// Algoritmo (spec oficial):
+///   hash = filesize
+///   hash += sum de los primeros 64 KB, leídos como u64 LE, wrapping
+///   hash += sum de los últimos 64 KB, leídos como u64 LE, wrapping
+///
+/// Devuelve 16 hex chars lowercase (u64 → hex zero-padded).
+///
+/// Cuando OpenSubtitles tiene subs indexados con hash matching, los
+/// devuelve como perfect match — sincronización garantizada. Es EL
+/// método que usan VLC, mpv y Stremio.
+///
+/// El caller debe pasar `first_64k` y `last_64k` ya leídos: en el
+/// contexto de videodrome son los primeros y últimos 64 KB del fichero
+/// dentro del torrent librqbit. Ambos buffers DEBEN ser exactamente
+/// 65536 bytes; si `file_len < 131072` (menos de 128 KB) no tiene
+/// sentido calcular hash — pass `None` al caller.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn compute_moviehash(file_len: u64, first_64k: &[u8], last_64k: &[u8]) -> Option<String> {
+    const CHUNK: usize = 65536;
+    if first_64k.len() != CHUNK || last_64k.len() != CHUNK {
+        return None;
+    }
+    let mut hash: u64 = file_len;
+    for chunk in first_64k.chunks_exact(8) {
+        let v = u64::from_le_bytes(chunk.try_into().ok()?);
+        hash = hash.wrapping_add(v);
+    }
+    for chunk in last_64k.chunks_exact(8) {
+        let v = u64::from_le_bytes(chunk.try_into().ok()?);
+        hash = hash.wrapping_add(v);
+    }
+    Some(format!("{hash:016x}"))
+}
+
+/// Busca subtítulos para una película. Al menos uno de `imdb_id`,
+/// `moviehash` o `query` debe estar informado.
+///
+/// * `moviehash` — hash OpenSubtitles del fichero (16 hex chars). Es
+///   el filtro más preciso posible: identifica el fichero exacto
+///   (bytes) y OpenSubtitles devuelve solo subs cuyo hash indexado
+///   coincide → sincronización perfecta con el release. Cuando lo
+///   tenemos, es unívoco y no necesitamos imdb_id ni query.
 /// * `imdb_id` — IMDb ID (`ttXXXXXXX` o solo el número). Filtra a la
 ///   película exacta.
 /// * `query` — texto libre. Cuando es el `release name` del torrent,
 ///   OpenSubtitles rankea los subs por parecido al release → primer
 ///   resultado ≈ edición correcta.
 /// * `languages` — coma-separado, ej. `"es,en,fr"`. Vacío = todos.
+///
+/// Prioridad: `moviehash` > `imdb_id` > `query`. Solo el primero
+/// presente se envía al API (evita AND estricto que descartaría
+/// subs válidos).
 pub async fn search(
     http: &Client,
+    moviehash: Option<&str>,
     imdb_id: Option<&str>,
     query: Option<&str>,
     languages: &str,
@@ -86,49 +147,123 @@ pub async fn search(
 
     // Construimos la query manualmente en el mismo orden que la doc para
     // que la cache-key del server no varíe entre llamadas equivalentes.
+    //
+    // IMPORTANTE: enviamos SOLO UNO de los filtros (hash, imdb, query)
+    // en orden de precisión. OpenSubtitles hace AND estricto entre
+    // varios de estos filtros: si combinamos imdb_id + query, filtraría
+    // los subs cuyo `release` NO matchee la query, aunque el imdb_id
+    // sea correcto — así se dejaban 200+ subs de Salò invisibles porque
+    // ningún release usa el título italiano completo.
     let mut params: Vec<(&str, String)> = Vec::new();
-    if let Some(id) = imdb_id {
+    if let Some(h) = moviehash.filter(|s| !s.is_empty()) {
+        params.push(("moviehash", h.to_lowercase()));
+    } else if let Some(id) = imdb_id {
         let n = id.trim_start_matches("tt");
         params.push(("imdb_id", n.to_string()));
-    }
-    if let Some(q) = query {
+    } else if let Some(q) = query {
         params.push(("query", q.to_string()));
     }
     if !languages.is_empty() {
         params.push(("languages", languages.to_string()));
     }
+    // Filtros anti-basura a nivel API:
+    //
+    //   * `machine_translated=exclude` → fuera los subs auto-traducidos
+    //     con Google Translate. Calidad terrible, casi ilegibles.
+    //
+    // NO excluimos `ai_translated`: los subs traducidos con LLM son
+    // razonablemente buenos y muchas veces son la ÚNICA opción en
+    // idiomas menores (español para cine europeo obscuro, etc.).
+    // Preferimos mostrarlos que quedarnos sin subs.
+    //
+    // Deliberadamente NO usamos `type=movie` — probamos y filtraba a
+    // cero para pelis antiguas / ediciones Criterion mal categorizadas
+    // en el catálogo. El caso "episodio de serie con mismo título" es
+    // raro y prefiero que se cuele un episodio a que una peli
+    // aparezca sin subs disponibles.
+    params.push(("machine_translated", "exclude".to_string()));
     // Ordena por descargas: los subs más usados van primero.
     params.push(("order_by", "download_count".to_string()));
     params.push(("order_direction", "desc".to_string()));
 
-    let resp = http
-        .get(format!("{API_BASE}/subtitles"))
-        .header("Api-Key", &key)
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", "application/json")
-        .query(&params)
-        .send()
-        .await
-        .context("Error de red hablando con OpenSubtitles")?;
+    // Paginación. OpenSubtitles REST v1 devuelve 50 resultados por
+    // página; sin este bucle nos quedábamos siempre en 50 (aunque
+    // hubiera 300+ subs indexados para la peli).
+    //
+    // La primera petición se manda sin `page` explícito (equivalente a
+    // page=1) y consulta `total_pages` de la respuesta. Si hay más,
+    // seguimos pidiendo hasta agotar o alcanzar el tope.
+    //
+    // Tope duro (`MAX_PAGES`) para no acercarse al rate-limit del API
+    // (5 req/s anónimo) ni disparar la latencia total: con 4 páginas
+    // cubrimos ~200 subs, más que suficiente incluso para pelis muy
+    // populares (una vez ordenadas por trusted+downloads los primeros
+    // 200 son mucho mejores que la cola). La paginación NO consume
+    // quota de descarga (esa solo la gasta POST /download).
+    const MAX_PAGES: u32 = 4;
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("OpenSubtitles /subtitles devolvió {status}: {body}");
+    let mut all_items: Vec<SearchItem> = Vec::new();
+    let mut page: u32 = 1;
+    loop {
+        // Clonamos los params base y añadimos `page=n` solo para p>1;
+        // así la primera request queda idéntica a la de siempre (y
+        // OpenSubtitles la cachea con la misma cache-key).
+        let mut page_params = params.clone();
+        if page > 1 {
+            page_params.push(("page", page.to_string()));
+        }
+
+        let resp = http
+            .get(format!("{API_BASE}/subtitles"))
+            .header("Api-Key", &key)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/json")
+            .query(&page_params)
+            .send()
+            .await
+            .context("Error de red hablando con OpenSubtitles")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("OpenSubtitles /subtitles devolvió {status}: {body}");
+        }
+
+        let json: SearchResponse = resp
+            .json()
+            .await
+            .context("Respuesta de OpenSubtitles no parseable como JSON")?;
+
+        // `total_pages=0` en respuestas vacías o si el servidor no lo
+        // envía; con `max(1)` evitamos loops infinitos y con el clamp
+        // por MAX_PAGES respetamos el tope duro.
+        let total_pages = json.total_pages.clamp(1, MAX_PAGES);
+        all_items.extend(json.data);
+
+        if page >= total_pages {
+            break;
+        }
+        page += 1;
     }
 
-    let json: SearchResponse = resp
-        .json()
-        .await
-        .context("Respuesta de OpenSubtitles no parseable como JSON")?;
+    let mut subs: Vec<Subtitle> = all_items.into_iter().filter_map(parse_item).collect();
 
-    let mut subs: Vec<Subtitle> = json.data.into_iter().filter_map(parse_item).collect();
+    // Ordenación final estable en dos pasos (sort_by_key es stable):
+    //
+    //   1. Trusted primero DENTRO de cada idioma — subs verificados
+    //      por moderador van arriba. Sin esto, un sub trusted con 100
+    //      descargas quedaba detrás de uno no-trusted con 200 y
+    //      cualquier bug de sync arruinaba la peli.
+    //   2. Orden por idioma según la lista explícita `languages`
+    //      (primero `es`, luego `en`, ...).
+    //
+    // Como `sort_by_key` es estable, aplicamos primero el criterio
+    // interno (trusted) y encima el criterio externo (idioma) para
+    // que el resultado final esté ordenado por idioma y, dentro,
+    // por trusted → downloads (el orden por descargas ya viene del
+    // servidor con `download_count desc`).
+    subs.sort_by_key(|s| !s.from_trusted);
 
-    // OpenSubtitles ordena por `download_count` global, así que el inglés
-    // arrasa aunque el usuario pida `es,en,fr,...`. Reordenamos en cliente
-    // respetando el orden explícito de la lista `languages`: primero
-    // todos los `es`, luego todos los `en`, etc. Dentro de cada idioma
-    // se conserva el orden por descargas devuelto por el servidor.
     if !languages.is_empty() {
         let order: Vec<&str> = languages.split(',').map(str::trim).collect();
         let rank = |lang: &str| -> usize {
@@ -204,8 +339,282 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
+/// Convierte contenido de un `.srt` a WebVTT en memoria. WebVTT es lo
+/// que consume `<track>` en HTML5 (WKWebView y WebView2 rechazan
+/// `.srt` directamente).
+///
+/// La diferencia es mínima:
+///   1. Header `WEBVTT` + línea en blanco.
+///   2. Timestamps: `HH:MM:SS,mmm` → `HH:MM:SS.mmm` (coma → punto).
+///
+/// Todo lo demás (numeración de cues, saltos entre cues, tags de
+/// texto) es compatible. Se acepta input con BOM UTF-8 y con
+/// codificación latin-1 heurística (algunos SRT antiguos vienen en
+/// windows-1252 y romperían al parsear como UTF-8 estricto).
+#[cfg(feature = "gui")]
+pub fn srt_to_vtt(srt_bytes: &[u8]) -> String {
+    // Decodifica en dos capas ortogonales:
+    //
+    //   1. **Encoding real de los bytes**:
+    //      * UTF-8 estricto primero — si valida, es lo que hay.
+    //      * Si UTF-8 estricto falla: contamos cuántos bytes son
+    //        inválidos. Si son POCOS (< 5% del archivo), es UTF-8
+    //        con corrupción menor (típico: 1-2 bytes basura en un
+    //        archivo de 50KB) → usamos `from_utf8_lossy` que
+    //        preserva todo lo válido y solo pinta U+FFFD (`�`) en
+    //        los bytes basura. Si son MUCHOS (>= 5%), el archivo no
+    //        es UTF-8: pasamos a chardetng + encoding_rs para
+    //        detectar Latin-1, cirílicos, chino, etc.
+    //      * El bug anterior era caer a chardetng ante CUALQUIER
+    //        error UTF-8, aunque fuera un byte suelto: chardetng
+    //        elegía CP1252 como best guess y decodificaba TODO el
+    //        archivo como Latin-1, generando mojibake (`é` UTF-8
+    //        `C3 A9` pintado como `Ã` + `©`) en cada acento.
+    //
+    //   2. **Fix de doble-encoding** (`try_fix_mojibake`): cubre el
+    //      caso ortogonal — archivos que son UTF-8 válidos pero cuyo
+    //      CONTENIDO es texto que alguien malinterpretó como Latin-1
+    //      y re-guardó como UTF-8 (`á` → `Ã¡`, `¿` → `Â¿`).
+    //
+    // El VTT resultante SIEMPRE sale UTF-8 puro, que es lo único
+    // que la spec WebVTT (y por tanto `<track>`) acepta.
+    let decoded: String = match std::str::from_utf8(srt_bytes) {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            // ¿Cuántos bytes son inválidos vs total?
+            let total = srt_bytes.len();
+            let invalid_ratio = estimate_invalid_utf8_ratio(srt_bytes, e);
+            if invalid_ratio < 0.05 {
+                eprintln!(
+                    "[subs] UTF-8 con {:.2}% bytes inválidos ({} total) → lossy decode",
+                    invalid_ratio * 100.0,
+                    total
+                );
+                String::from_utf8_lossy(srt_bytes).into_owned()
+            } else {
+                eprintln!(
+                    "[subs] UTF-8 con {:.2}% bytes inválidos → chardetng",
+                    invalid_ratio * 100.0
+                );
+                let mut detector = chardetng::EncodingDetector::new();
+                detector.feed(srt_bytes, true);
+                let encoding = detector.guess(None, true);
+                let (cow, actual, _had_errors) = encoding.decode(srt_bytes);
+                eprintln!("[subs] chardetng eligió: {}", actual.name());
+                cow.into_owned()
+            }
+        }
+    };
+    let text = try_fix_mojibake(&decoded);
+    // Strip BOM.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    // Normaliza newlines CRLF → LF para poder trabajar por líneas.
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    // Regex-free timestamp swap: buscamos patrones `dd:dd:dd,ddd` y
+    // cambiamos la coma por punto. Evita añadir dep de regex.
+    let converted = swap_srt_timestamps(&normalized);
+    let mut out = String::with_capacity(converted.len() + 16);
+    out.push_str("WEBVTT\n\n");
+    out.push_str(&converted);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Estima el porcentaje de bytes inválidos UTF-8 en un buffer.
+/// Recorremos el buffer intentando decodear como UTF-8; cada vez que
+/// tropezamos con un byte inválido, incrementamos el contador y
+/// saltamos ese byte (no reintentamos secuencias multi-byte
+/// completas). Aproximación suficiente para distinguir "1 byte
+/// basura en 50KB de UTF-8 válido" de "todo el archivo es Latin-1".
+#[cfg(feature = "gui")]
+fn estimate_invalid_utf8_ratio(bytes: &[u8], _first_err: std::str::Utf8Error) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut invalid = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match std::str::from_utf8(&bytes[cursor..]) {
+            Ok(_) => break,
+            Err(e) => {
+                cursor += e.valid_up_to();
+                let step = e.error_len().unwrap_or(bytes.len() - cursor);
+                invalid += step;
+                cursor += step;
+                if e.error_len().is_none() {
+                    // Trailing incomplete sequence — no seguimos.
+                    break;
+                }
+            }
+        }
+    }
+    invalid as f64 / bytes.len() as f64
+}
+
+/// "cuán malo pinta esto" — cuantos más matches, más probable que sea
+/// texto doble-encodeado.
+#[cfg(feature = "gui")]
+#[allow(clippy::invisible_characters)]
+fn mojibake_score(s: &str) -> usize {
+    // Los patterns incluyen soft hyphen U+00AD y otros chars invisibles
+    // porque son parte real del bitstream mojibake que estamos detectando
+    // (0xC3 0xAD = UTF-8 "í" leído byte a byte como Latin-1 = "Ã" + SHY).
+    // No es un typo — es lo que buscamos literalmente.
+    // Pares Latin1(UTF-8) que salen al doble-encodear caracteres
+    // acentuados típicos: á é í ó ú ñ ü ¿ ¡ « » – "smart quotes".
+    // Incluimos también `Ã` y `Â` aislados (con el char siguiente en
+    // rango Latin-1 supplement) porque cubren casos raros de acentos
+    // menos comunes.
+    const PATTERNS: &[&str] = &[
+        "Ã¡",
+        "Ã©",
+        "Ã­",
+        "Ã³",
+        "Ãº",
+        "Ã±",
+        "Ã¼",
+        "Ã‘",
+        "Ã\u{81}",
+        "Ã‰",
+        "Ã\u{8d}",
+        "Ã\u{93}",
+        "Ãš",
+        "Â¿",
+        "Â¡",
+        "Â«",
+        "Â»",
+        "Â°",
+        "Â·",
+        "â\u{80}\u{9c}",
+        "â\u{80}\u{9d}",
+        "â\u{80}\u{93}",
+        "â\u{80}\u{94}",
+        "â\u{80}\u{a6}",
+    ];
+    PATTERNS.iter().map(|p| s.matches(p).count()).sum()
+}
+
+/// Intenta el fix mojibake y devuelve la mejor versión (original o
+/// fixed) según cuál tenga MENOS secuencias mojibake residuales. Si
+/// el fix reduce estrictamente el score → mejor. Si empata o empeora
+/// → dejamos el original (evita romper subs genuinamente en portugués
+/// o nórdico que usan `Ã` legítimamente).
+#[cfg(feature = "gui")]
+fn try_fix_mojibake(s: &str) -> String {
+    let original_score = mojibake_score(s);
+    if original_score == 0 {
+        return s.to_string();
+    }
+    let fixed = fix_mojibake(s);
+    if mojibake_score(&fixed) < original_score {
+        fixed
+    } else {
+        s.to_string()
+    }
+}
+
+/// Revierte el doble-encoding aplicando reemplazos targeted por cada
+/// secuencia mojibake conocida. NO intenta decode UTF-8 del string
+/// entero (approach anterior): si el archivo mezclaba mojibake con
+/// chars UTF-8 limpios (p.ej. "señor Ã©l" con `ñ` bien y `Ã©`
+/// mojibake), el byte del `ñ` (0xF1) rompía el decode y el fix
+/// entero se abandonaba → el sub salía mojibake en pantalla.
+///
+/// Los pares están ordenados por longitud descendente para evitar
+/// que un reemplazo corto (`"Ã"` p.ej.) rompa uno largo (`"Ã©"`).
+/// En la práctica no tenemos casos ambiguos aquí porque todos los
+/// pairs tienen prefix único.
+#[cfg(feature = "gui")]
+#[allow(clippy::invisible_characters)]
+fn fix_mojibake(s: &str) -> String {
+    // (mojibake, char correcto). Cubre acentos españoles minúscula
+    // + mayúscula, signos ¿¡«»°·, smart quotes, en/em dash y ellipsis.
+    const REPLACEMENTS: &[(&str, &str)] = &[
+        // Smart quotes y dashes (3 bytes mojibake → 3 bytes UTF-8).
+        ("â\u{80}\u{9c}", "\u{201c}"), // "  (left double quote)
+        ("â\u{80}\u{9d}", "\u{201d}"), // "  (right double quote)
+        ("â\u{80}\u{98}", "\u{2018}"), // '
+        ("â\u{80}\u{99}", "\u{2019}"), // '
+        ("â\u{80}\u{93}", "\u{2013}"), // –  (en dash)
+        ("â\u{80}\u{94}", "\u{2014}"), // —  (em dash)
+        ("â\u{80}\u{a6}", "\u{2026}"), // …
+        // Acentos minúscula.
+        ("Ã¡", "á"),
+        ("Ã©", "é"),
+        ("Ã­", "í"),
+        ("Ã³", "ó"),
+        ("Ãº", "ú"),
+        ("Ã±", "ñ"),
+        ("Ã¼", "ü"),
+        // Acentos mayúscula (los bytes UTF-8 de Á É Í Ó Ú Ñ Ü empiezan
+        // por C3 y su segundo byte cae en el rango de chars imprimibles
+        // Latin-1, por eso salen como `Ã` + char alto).
+        ("Ã\u{81}", "Á"),
+        ("Ã‰", "É"),
+        ("Ã\u{8d}", "Í"),
+        ("Ã\u{93}", "Ó"),
+        ("Ãš", "Ú"),
+        ("Ã‘", "Ñ"),
+        ("Ãœ", "Ü"),
+        // Signos y símbolos comunes.
+        ("Â¿", "¿"),
+        ("Â¡", "¡"),
+        ("Â«", "«"),
+        ("Â»", "»"),
+        ("Â°", "°"),
+        ("Â·", "·"),
+        ("Â´", "´"),
+    ];
+    let mut out = s.to_string();
+    for (from, to) in REPLACEMENTS {
+        if out.contains(from) {
+            out = out.replace(from, to);
+        }
+    }
+    out
+}
+
+/// Cambia `HH:MM:SS,mmm --> HH:MM:SS,mmm` por `HH:MM:SS.mmm --> HH:MM:SS.mmm`.
+/// Se aplica solo a comas que estén rodeadas por dígitos (para no tocar
+/// comas en el texto de los subs).
+///
+/// Itera por CHARS UNICODE, no por bytes. La versión anterior hacía
+/// `out.push(byte as char)` — eso descompone los chars UTF-8
+/// multi-byte en sus bytes individuales (el char `¿` = UTF-8 bytes
+/// `C2 BF` se rompía en dos chars `Â` + `¿`). Cualquier acento en un
+/// sub se corrompía silenciosamente porque el string SEGUÍA siendo
+/// UTF-8 válido, solo que con chars distintos.
+#[cfg(feature = "gui")]
+fn swap_srt_timestamps(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c == ','
+            && i > 0
+            && chars[i - 1].is_ascii_digit()
+            && i + 1 < chars.len()
+            && chars[i + 1].is_ascii_digit()
+        {
+            out.push('.');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn parse_item(it: SearchItem) -> Option<Subtitle> {
     let a = it.attributes;
+    // Safety net contra MT (Google Translate) aunque el filtro del API
+    // los deje pasar (algunas entradas antiguas no tienen el flag).
+    // NO filtramos AI-translated: son a menudo la única opción en
+    // idiomas menores y su calidad es aceptable.
+    if a.machine_translated.unwrap_or(false) {
+        return None;
+    }
     let file = a.files.into_iter().next()?;
     Some(Subtitle {
         file_id: file.file_id,
@@ -214,7 +623,11 @@ fn parse_item(it: SearchItem) -> Option<Subtitle> {
         downloads: a.download_count.unwrap_or(0),
         rating: a.ratings.unwrap_or(0.0),
         hearing_impaired: a.hearing_impaired.unwrap_or(false),
+        from_trusted: a.from_trusted.unwrap_or(false),
         file_name: file.file_name,
+        // El flag lo pone el caller (gui.rs) tras la búsqueda por
+        // hash; aquí nace siempre false.
+        hash_match: false,
     })
 }
 
@@ -223,6 +636,12 @@ fn parse_item(it: SearchItem) -> Option<Subtitle> {
 #[derive(Deserialize)]
 struct SearchResponse {
     data: Vec<SearchItem>,
+    /// Total de páginas disponibles para la búsqueda actual. La API
+    /// pagina a 50 resultados por página; sin leer esto nos quedamos
+    /// siempre en la primera. Puede venir ausente en respuestas
+    /// vacías → default 0, que el loop de paginación trata como "1".
+    #[serde(default)]
+    total_pages: u32,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +661,21 @@ struct Attrs {
     ratings: Option<f32>,
     #[serde(default)]
     hearing_impaired: Option<bool>,
+    /// Sub verificado por moderador OpenSubtitles. Se usa para
+    /// priorizar en el sort (trusted primero dentro de cada idioma).
+    #[serde(default)]
+    from_trusted: Option<bool>,
+    /// Marcado en el catálogo como traducción automática (Google
+    /// Translate). Se descarta en `parse_item` como safety net por
+    /// si el filtro `machine_translated=exclude` del API falla.
+    #[serde(default)]
+    machine_translated: Option<bool>,
+    /// Traducción hecha con LLM. Lo tolerámos: son a menudo la única
+    /// opción en idiomas menores. Se deserializa por completitud pero
+    /// no filtramos por él.
+    #[serde(default)]
+    #[allow(dead_code)]
+    ai_translated: Option<bool>,
     #[serde(default)]
     files: Vec<FileRef>,
 }

@@ -822,6 +822,7 @@ async fn run_app(
                                 tokio::spawn(async move {
                                     match subtitles::search(
                                         &http_c,
+                                        None,
                                         imdb.as_deref(),
                                         Some(&query),
                                         subtitles::DEFAULT_LANGUAGES,
@@ -1022,11 +1023,14 @@ fn spawn_torrents(
                 imdb_id: imdb_id.clone(),
                 tmdb_id: Some(tmdb_id),
                 original_language: original_language.clone(),
+                title_variants: Vec::new(),
             };
             // min_seeders=1 en la TUI: los reportes de seeders de los
             // indexers son aproximados y filtrar por 3 pierde demasiadas
             // pelis de nicho.
-            let mut list = torrents::search_all(&http, &providers, &primary_query, 1, 40).await;
+            let mut list = torrents::search_all(&http, &providers, &primary_query, 3, 40)
+                .await
+                .results;
 
             // Fallback: si no hay resultados con el título original y
             // tenemos título ruso, reintentar. Los indexers rusos (RuTracker,
@@ -1042,8 +1046,11 @@ fn spawn_torrents(
                         imdb_id,
                         tmdb_id: Some(tmdb_id),
                         original_language: original_language.clone(),
+                        title_variants: Vec::new(),
                     };
-                    let raw = torrents::search_all(&http, &providers, &ru_query, 1, 40).await;
+                    let raw = torrents::search_all(&http, &providers, &ru_query, 3, 40)
+                        .await
+                        .results;
                     // Filtro estricto adicional para el fallback ruso: los
                     // scene rusos siguen el patrón `<Nombre ruso> / <Nombre
                     // original> [año, ...]`, así que el release TIENE que
@@ -1115,11 +1122,14 @@ fn spawn_direct_search(
             imdb_id: None,
             tmdb_id: None,
             original_language: None,
+            title_variants: Vec::new(),
         };
         let _ = tx.send(TorrentEvent::Status(format!("Buscando \"{title}\"…")));
 
         let providers = torrents::default_providers();
-        let list = torrents::search_all(&http, &providers, &query, 1, 40).await;
+        let list = torrents::search_all(&http, &providers, &query, 3, 40)
+            .await
+            .results;
         let _ = tx.send(TorrentEvent::Done(list));
     });
 }
@@ -1560,7 +1570,7 @@ fn draw_torrents(f: &mut Frame, app: &mut App) {
                     Cell::from(format!("↓{}", t.leechers)).style(Style::default().fg(Color::Red)),
                     Cell::from(q.to_string()).style(Style::default().fg(Color::Cyan)),
                     Cell::from(audio.badge().to_string()).style(Style::default().fg(audio_color)),
-                    Cell::from(t.source).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(t.source.clone()).style(Style::default().fg(Color::DarkGray)),
                 ])
             })
             .collect();

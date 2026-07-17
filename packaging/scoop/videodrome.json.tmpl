@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
   "version": "{{VERSION}}",
-  "description": "Recomendaciones Letterboxd + streaming BitTorrent en VLC (GUI + CLI, mismo binario).",
+  "description": "Recomendaciones Letterboxd + streaming BitTorrent con player embebido (GUI + CLI, mismo binario).",
   "homepage": "https://github.com/{{REPO}}",
   "license": "MIT",
   "url": "https://github.com/{{REPO}}/releases/download/{{TAG}}/videodrome-{{TAG}}-windows-x86_64.zip",
@@ -12,13 +12,14 @@
   "shortcuts": [
     ["videodrome.exe", "Videodrome"]
   ],
-  "depends": ["extras/vlc"],
+  "depends": ["main/ffmpeg"],
   "notes": [
     "Videodrome se ha instalado con GUI + CLI en el mismo binario.",
     "  · Doble click en Start Menu (o busca 'Videodrome') → GUI.",
     "  · `videodrome recommend` en PowerShell/cmd → CLI.",
     "  · `videodrome tui` → TUI en terminal.",
-    "VLC se instaló automáticamente como dependencia (bucket 'extras')."
+    "ffmpeg (bucket 'main') se instaló como dependencia — lo usa el player embebido para transmux.",
+    "Reproductor: por defecto embebido. Si prefieres VLC externo, instálalo aparte con `scoop bucket add extras && scoop install extras/vlc` y cambíalo en Ajustes."
   ],
   "checkver": {
     "github": "https://github.com/{{REPO}}"

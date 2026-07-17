@@ -7,10 +7,11 @@
 # Qué hace:
 #   1. Detecta el sistema (macOS / Linux / Windows via WSL/git-bash).
 #   2. En macOS: instala Homebrew si no existe (script oficial) →
-#      tap ser356/cask → brew install --cask videodrome. VLC se instala
-#      solo como dependencia del cask.
+#      tap ser356/cask → brew install --cask videodrome. ffmpeg se
+#      instala como dependencia obligatoria del cask (VLC ya no).
 #   3. En Linux: descarga el tarball de la última release en
-#      ~/.local/bin. Recuerda al user instalar VLC con su gestor.
+#      ~/.local/bin. Recuerda al user instalar ffmpeg con su gestor
+#      (necesario para el player embebido).
 #   4. En Windows (git-bash / WSL): imprime el one-liner de PowerShell
 #      y sale — el flujo Windows es Scoop, no bash.
 #
@@ -150,7 +151,7 @@ EOF
   step "Confirmando confianza en el tap..."
   brew trust "$TAP" >/dev/null 2>&1 || true
 
-  step "Instalando videodrome (incluye VLC como dep si no lo tienes)..."
+  step "Instalando videodrome (arrastra ffmpeg como dep si no lo tienes)..."
   brew install --cask videodrome
 
   ok "Listo. Abre Videodrome desde Launchpad o ejecuta 'videodrome' en el terminal."
@@ -198,18 +199,19 @@ install_linux() {
     esac
   fi
 
-  # Dependencia GUI para streaming: VLC. No la instalamos por ti —
-  # cada distro tiene su gestor. Aviso claro:
-  if ! command -v vlc >/dev/null 2>&1; then
-    warn "VLC no está instalado. Es necesario para la opción 'stream'."
+  # Dependencia REAL: ffmpeg. El player embebido lo usa para
+  # transmux (MKV/HEVC/VP9 → fMP4 fragmentado sobre HLS). Sin él
+  # la reproducción no arranca.
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+    warn "ffmpeg no está instalado. Necesario para el player embebido."
     if command -v apt-get >/dev/null 2>&1; then
-      printf "     %ssudo apt install vlc%s\n" "$BOLD" "$RESET"
+      printf "     %ssudo apt install ffmpeg%s\n" "$BOLD" "$RESET"
     elif command -v dnf >/dev/null 2>&1; then
-      printf "     %ssudo dnf install vlc%s\n" "$BOLD" "$RESET"
+      printf "     %ssudo dnf install ffmpeg%s\n" "$BOLD" "$RESET"
     elif command -v pacman >/dev/null 2>&1; then
-      printf "     %ssudo pacman -S vlc%s\n" "$BOLD" "$RESET"
+      printf "     %ssudo pacman -S ffmpeg%s\n" "$BOLD" "$RESET"
     else
-      printf "     Instálalo desde tu gestor de paquetes o https://www.videolan.org\n"
+      printf "     Instálalo desde tu gestor de paquetes o https://ffmpeg.org\n"
     fi
   fi
 

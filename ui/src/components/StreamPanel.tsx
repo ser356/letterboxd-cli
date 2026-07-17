@@ -143,8 +143,8 @@ export function StreamPanel({
         <p className="text-body">{message}</p>
       ) : (
         <p className="text-body">
-          Pulsa <Kbd>Enter</Kbd> para proyectar el torrent seleccionado
-          en VLC (te preguntará si quieres subtítulos antes de arrancar).{' '}
+          Pulsa <Kbd>Enter</Kbd> para proyectar el torrent seleccionado.
+          Los subtítulos se eligen desde el propio reproductor.{' '}
           <Kbd>S</Kbd> envía el magnet a tu cliente BitTorrent por
           defecto.
         </p>

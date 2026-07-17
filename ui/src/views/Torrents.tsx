@@ -1,27 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { AskSubsDialog } from '../components/AskSubsDialog'
 import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { ResumeDialog } from '../components/ResumeDialog'
 import { StreamPanel } from '../components/StreamPanel'
-import { SubsSheet } from '../components/SubsSheet'
 import { TopNav } from '../components/TopNav'
 import {
   audioFlag,
-  downloadSubtitle,
+  ffmpegAvailable,
   formatSize,
+  getPreferences,
   getResume,
   isTauri,
   openMagnet,
-  searchSubtitles,
   searchTorrentsByTmdb,
   searchTorrentsDirect,
   startStreamWithSub,
   stopStream,
+  type ProviderStatus,
   type Resume,
   type StreamInfo,
-  type Subtitle,
   type Torrent,
   type TorrentSearchResult,
 } from '../lib/api'
@@ -52,18 +50,9 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   const [streamMsg, setStreamMsg] = useState<string | null>(null)
 
   // Subs state (modal sheet + gate dialog)
-  const [subsOpen, setSubsOpen] = useState(false)
-  const [askSubsOpen, setAskSubsOpen] = useState(false)
-  const [subsLoading, setSubsLoading] = useState(false)
-  const [subs, setSubs] = useState<Subtitle[]>([])
-  const [pendingSubPath, setPendingSubPath] = useState<string | null>(null)
-  // Nombre legible del sub cargado (release / file_name). Se guarda al
-  // mismo tiempo que `pendingSubPath` para poder mostrarlo en el toast
-  // cuando el user re-lanza un stream con el mismo sub sin volver a
-  // abrir el sheet de selección.
-  const [pendingSubRelease, setPendingSubRelease] = useState<string | null>(
-    null,
-  )
+  // — eliminado: la selección de subs vive dentro del player HTML
+  // ahora (panel embebido con tabs por idioma). Aquí solo iniciamos
+  // el stream; el Player pide OpenSubtitles al arrancar.
 
   // Menú contextual (click derecho) sobre una fila de torrent.
   const [menu, setMenu] = useState<{
@@ -74,16 +63,31 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
 
   // Resume state: se pregunta ANTES del stream cuando la caché tiene
   // una posición previa reproducible (fraction en 2%–95% y runtime
-  // conocido).
+  // conocido). Ya no arrastra subPath/subRelease — la selección de
+  // subs vive dentro del player HTML.
   const [resumePrompt, setResumePrompt] = useState<{
     fraction: number
     seconds: number
-    subPath: string | null
-    subRelease: string | null
   } | null>(null)
 
   // Panel toggle: false = stream progress, true = magnet raw text
   const [showMagnet, setShowMagnet] = useState(false)
+
+  // Reproductor por defecto (preferencia del user). Cuando es `html`
+  // y ffmpeg está en PATH, Enter/click enruta al player embebido en
+  // vez de spawnear VLC. Si el user tiene `html` pero no tiene
+  // ffmpeg, caemos silenciosamente a VLC con un aviso en el toast.
+  const [defaultPlayer, setDefaultPlayer] = useState<'html' | 'vlc'>('html')
+  const [ffmpegOk, setFfmpegOk] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!isTauri()) return
+    void getPreferences()
+      .then((p) => setDefaultPlayer(p.default_player))
+      .catch(() => {})
+    void ffmpegAvailable()
+      .then(setFfmpegOk)
+      .catch(() => setFfmpegOk(false))
+  }, [])
 
   // Scroll selected row into view whenever selection changes
   const rowsRef = useRef<Array<HTMLLIElement | null>>([])
@@ -150,9 +154,45 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     subPath: string | null = null,
     subRelease: string | null = null,
     resumeSeconds: number | null = null,
+    forceVlc = false,
   ) => {
     if (!current) return
-    setStreamMsg(`Iniciando stream: ${current.title}…`)
+    const useHtml = !forceVlc && defaultPlayer === 'html' && ffmpegOk !== false
+    // Ruta preferida: player HTML embebido. La reproducción, subs y
+    // resume viven en la view `/player`. Torrents queda como
+    // seleccionador de fuente; el streaming lo arranca el propio Player.
+    if (useHtml) {
+      // `tmdbId` viaja al Player solo en modo tmdb (viene de Recs
+      // o Search). El Player lo usa para pedir el backdrop al
+      // arrancar y pintarlo detrás del loader al estilo Stremio.
+      // En modo direct (búsqueda por texto) no lo tenemos → el
+      // loader cae a fondo negro sin backdrop.
+      const tmdbIdNum =
+        mode === 'tmdb' && tmdbId ? Number(tmdbId) : null
+      nav('/player', {
+        state: {
+          magnet: current.magnet,
+          title: result?.title ?? current.title,
+          imdbId: result?.imdb_id ?? null,
+          tmdbId: Number.isFinite(tmdbIdNum) ? tmdbIdNum : null,
+          subPath,
+          subRelease,
+          startSeconds: resumeSeconds ?? 0,
+        },
+      })
+      return
+    }
+    // Fallback VLC (preferencia explícita del user o ffmpeg no
+    // disponible en PATH). Mantiene la ruta legacy con proceso
+    // externo. El aviso al user no menciona ffmpeg — la app decide
+    // internamente cómo reproducir; si algo falla en la config
+    // (dep faltante) usamos el player externo sin explicar el
+    // motivo, para no exponer plumbing.
+    if (defaultPlayer === 'html' && ffmpegOk === false && !forceVlc) {
+      setStreamMsg('Reproducci\u00f3n embebida no disponible. Abriendo con VLC\u2026')
+    } else {
+      setStreamMsg(`Iniciando stream: ${current.title}\u2026`)
+    }
     if (stream) {
       await stopStream(stream.id).catch(() => {})
       setStream(null)
@@ -160,9 +200,9 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     try {
       const info = await startStreamWithSub(current.magnet, subPath, resumeSeconds)
       setStream(info)
-      const subNote = subRelease ? `  ·  sub: ${subRelease}` : ''
+      const subNote = subRelease ? `  \u00b7  sub: ${subRelease}` : ''
       const resumeNote = resumeSeconds
-        ? `  ·  reanudado en ${formatMinutes(resumeSeconds)}`
+        ? `  \u00b7  reanudado en ${formatMinutes(resumeSeconds)}`
         : ''
       setStreamMsg(`Streaming ${info.file_name}${subNote}${resumeNote}`)
     } catch (e) {
@@ -172,102 +212,76 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
 
   /**
    * Antes de arrancar el stream, consulta la caché a ver si hay un
-   * resume guardado para este magnet. Si la fracción está en el rango
-   * "útil" (2%–95%) y conocemos el runtime de TMDB (solo modo `tmdb`),
-   * abrimos el ResumeDialog en lugar de arrancar directo — el usuario
-   * decide reanudar o empezar de cero. Sin runtime no podemos convertir
-   * bytes→segundos, así que empezamos siempre desde el principio.
+   * resume guardado para este magnet. Prioridad de fuentes de tiempo,
+   * de más precisa a menos:
+   *
+   *   1. `resume.seconds` + `resume.duration_seconds` — reportado por
+   *      el player HTML. Precisión exacta y funciona sin TMDB.
+   *   2. `resume.seconds` + `result.runtime_minutes * 60` — cuando
+   *      el player reportó posición pero la duración de ffprobe
+   *      llegó como 0/null. `runtime_minutes` de TMDB hace el papel.
+   *   3. `resume.fraction` byte-based + `result.runtime_minutes` —
+   *      camino legacy (path VLC / cachés antiguas). Necesita TMDB
+   *      para convertir a segundos.
+   *
+   * En todos los casos abrimos el ResumeDialog si la posición cae
+   * entre el 2% y el 95% del runtime. Fuera de ese rango o sin
+   * datos, empezamos desde el principio.
    */
-  const maybePromptResume = async (
-    subPath: string | null,
-    subRelease: string | null,
-  ) => {
+  const maybePromptResume = async () => {
     if (!current) return
-    if (result?.runtime_minutes) {
-      try {
-        const r: Resume | null = await getResume(current.magnet)
-        if (r && r.fraction > 0.02 && r.fraction < 0.95) {
-          const seconds = Math.round(r.fraction * result.runtime_minutes * 60)
+    let resume: Resume | null = null
+    try {
+      resume = await getResume(current.magnet)
+    } catch {
+      // Backend falla leyendo el resume → empezar limpio.
+      resume = null
+    }
+    if (resume) {
+      // Duración conocida por cualquier vía: la reportada por el
+      // player (preferida por exactitud) o la de TMDB como respaldo.
+      const knownDuration =
+        resume.duration_seconds && resume.duration_seconds > 0
+          ? resume.duration_seconds
+          : result?.runtime_minutes
+            ? result.runtime_minutes * 60
+            : null
+
+      // Fuente 1 y 2: si tenemos `seconds` y una duración por algún
+      // lado, calculamos la fracción y decidimos.
+      if (resume.seconds != null && knownDuration != null && knownDuration > 0) {
+        const fraction = resume.seconds / knownDuration
+        if (fraction > 0.02 && fraction < 0.95) {
           setResumePrompt({
-            fraction: r.fraction,
-            seconds,
-            subPath,
-            subRelease,
+            fraction,
+            seconds: Math.round(resume.seconds),
           })
           return
         }
-      } catch {
-        // Si el backend falla leyendo el resume, fallback a empezar
-        // desde el principio en lugar de bloquear al user.
+      } else if (
+        // Fuente 3: solo `fraction` byte-based + runtime de TMDB.
+        result?.runtime_minutes &&
+        resume.fraction > 0.02 &&
+        resume.fraction < 0.95
+      ) {
+        setResumePrompt({
+          fraction: resume.fraction,
+          seconds: Math.round(resume.fraction * result.runtime_minutes * 60),
+        })
+        return
       }
     }
-    await goStream(subPath, subRelease, null)
+    await goStream(null, null, null)
   }
 
-  // Enter en la lista de torrents: preguntar por subs antes de streamear.
-  // Si no hay torrent seleccionado, no-op. Si ya hay un sub cargado
-  // (pendingSubPath), saltamos el AskSubsDialog y vamos directos al
-  // flujo de resume/stream — el usuario ya expresó "quiero subs" al
-  // seleccionar uno; que la app le vuelva a preguntar es ruido.
+  // Enter en la lista de torrents: prompt de resume (si hay caché) y
+  // luego al player. La elección de subtítulos vive dentro del player
+  // ahora (panel embebido estilo Stremio) — antes había un diálogo
+  // intermedio ("¿con subs?" → SubsSheet → resume → player) que
+  // añadía fricción sin valor.
   const startStreamFlow = () => {
     if (!current) return
-    if (pendingSubPath) {
-      void maybePromptResume(pendingSubPath, pendingSubRelease)
-      return
-    }
-    setAskSubsOpen(true)
-  }
-
-  const confirmStreamWithSubs = () => {
-    setAskSubsOpen(false)
-    openSubs()
-  }
-
-  const confirmStreamWithoutSubs = async () => {
-    setAskSubsOpen(false)
-    setPendingSubPath(null)
-    setPendingSubRelease(null)
-    await maybePromptResume(null, null)
-  }
-
-  const openSubs = async () => {
-    if (!current) return
-    setSubsOpen(true)
-    setSubsLoading(true)
-    setSubs([])
-    try {
-      const list = await searchSubtitles(result?.imdb_id ?? null, current.title)
-      setSubs(list)
-    } catch (e) {
-      setStreamMsg(`Error subs: ${String(e)}`)
-      setSubsOpen(false)
-    } finally {
-      setSubsLoading(false)
-    }
-  }
-
-  const chooseSub = async (sub: Subtitle) => {
-    setSubsLoading(true)
-    try {
-      const path = await downloadSubtitle(sub)
-      const release = sub.release || sub.file_name || 'sub'
-      setPendingSubPath(path)
-      setPendingSubRelease(release)
-      setSubsOpen(false)
-      // Encadenar con el stream: el usuario ya confirmó "con subs" en
-      // el diálogo previo, no hay que volver a pedir Enter.
-      await maybePromptResume(path, release)
-    } catch (e) {
-      setStreamMsg(`Error descargando sub: ${String(e)}`)
-    } finally {
-      setSubsLoading(false)
-    }
-  }
-
-  const clearPendingSub = () => {
-    setPendingSubPath(null)
-    setPendingSubRelease(null)
-    setStreamMsg('Subtítulos quitados. El próximo stream irá sin subs.')
+    void maybePromptResume()
   }
 
   const copyMagnet = async () => {
@@ -312,12 +326,11 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
     { key: 'b', hint: '', run: goBack },
     { key: 'Escape', hint: 'Volver', run: goBack },
   ]
-  // Cuando cualquier modal (subs sheet, diálogo de subs, prompt de
-  // resume o menú contextual) está abierto, sus hotkeys locales toman
-  // el control y las de la vista se desactivan para no disparar
-  // handlers dobles.
-  useHotkeys(hotkeys, [current, stream, pendingSubPath, backTo], {
-    enabled: !subsOpen && !askSubsOpen && !resumePrompt && !menu,
+  // Cuando el prompt de resume o el menú contextual están abiertos,
+  // sus hotkeys locales toman el control y las de la vista se
+  // desactivan para no disparar handlers dobles.
+  useHotkeys(hotkeys, [current, stream, backTo], {
+    enabled: !resumePrompt && !menu,
   })
 
   const label = result?.title
@@ -329,14 +342,6 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
   return (
     <div className="flex h-[100dvh] flex-col bg-canvas">
       <TopNav>
-        {pendingSubPath && (
-          <span
-            className="rounded-full border border-good/40 bg-good/10 px-3 py-1 text-[12px] text-good"
-            title={pendingSubRelease ?? undefined}
-          >
-            Sub listo
-          </span>
-        )}
         <button
           onClick={goBack}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
@@ -363,19 +368,27 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           </p>
         </div>
 
+        {/* Fase 1b — línea de estado por provider. Se pinta bajo el
+            título con la misma jerarquía visual que el contador de
+            resultados: información secundaria pero visible. Cuando un
+            provider timeoutea/falla, la lista corta ya no queda
+            explicada como "no hay releases" sino como "knaben cayó". */}
+        {result?.providers && result.providers.length > 0 && (
+          <ProviderStatusLine providers={result.providers} />
+        )}
+
         {error && (
           <div className="rounded-sm border border-danger/40 bg-danger/10 p-4 text-[14px] text-danger">
             {error}
           </div>
         )}
 
+        {loading && !error && (
+          <TorrentSearchLoader />
+        )}
+
         {!error && torrents.length === 0 && !loading && result && (
-          <div className="rounded-sm border border-hairline bg-surface p-10 text-center">
-            <p className="text-[16px] text-ink">Sin resultados.</p>
-            <p className="mt-1 text-[13px] text-muted">
-              Los indexadores no encontraron nada para "{label}".
-            </p>
-          </div>
+          <EmptyResultsPanel result={result} onBack={goBack} />
         )}
 
         {torrents.length > 0 && (
@@ -441,24 +454,6 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
 
       <HotkeyBar hotkeys={hotkeys.filter((h) => h.hint)} />
 
-      {subsOpen && (
-        <SubsSheet
-          subs={subs}
-          loading={subsLoading}
-          onPick={chooseSub}
-          onClose={() => setSubsOpen(false)}
-        />
-      )}
-
-      {askSubsOpen && (
-        <AskSubsDialog
-          title={current?.title ?? ''}
-          onYes={confirmStreamWithSubs}
-          onNo={confirmStreamWithoutSubs}
-          onClose={() => setAskSubsOpen(false)}
-        />
-      )}
-
       {resumePrompt && (
         <ResumeDialog
           fraction={resumePrompt.fraction}
@@ -466,12 +461,11 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           onResume={async () => {
             const p = resumePrompt
             setResumePrompt(null)
-            await goStream(p.subPath, p.subRelease, p.seconds)
+            await goStream(null, null, p.seconds)
           }}
           onRestart={async () => {
-            const p = resumePrompt
             setResumePrompt(null)
-            await goStream(p.subPath, p.subRelease, null)
+            await goStream(null, null, null)
           }}
           onClose={() => setResumePrompt(null)}
         />
@@ -485,15 +479,31 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
           items={((): ContextMenuItem[] => {
             const t = torrents[menu.index]
             if (!t) return []
-            const hasSub = pendingSubPath !== null
-            return [
+            const usingHtml =
+              defaultPlayer === 'html' && ffmpegOk !== false
+            const primaryLabel = usingHtml
+              ? 'Proyectar en player'
+              : 'Proyectar en VLC'
+            const items: ContextMenuItem[] = [
               {
-                label: hasSub
-                  ? 'Proyectar en VLC (con sub cargado)'
-                  : 'Proyectar en VLC',
-                hint: '↵',
+                label: primaryLabel,
+                hint: '\u21b5',
                 onClick: startStreamFlow,
               },
+            ]
+            // Escape hatch: cuando la preferencia es player HTML,
+            // ofrecer "Abrir en VLC" para este torrent puntual.
+            // Al revés no tiene sentido: si ya es VLC el default,
+            // la entrada primaria ya es VLC.
+            if (usingHtml) {
+              items.push({
+                label: 'Abrir en VLC (este torrent)',
+                onClick: () => {
+                  void goStream(null, null, null, true)
+                },
+              })
+            }
+            items.push(
               {
                 label: 'Abrir en cliente de torrents',
                 hint: 's',
@@ -505,22 +515,8 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' }) {
                   void copyMagnet()
                 },
               },
-              {
-                label: hasSub
-                  ? 'Cambiar subtítulos…'
-                  : 'Elegir subtítulos…',
-                onClick: openSubs,
-              },
-              ...(hasSub
-                ? [
-                    {
-                      label: 'Quitar subtítulos',
-                      destructive: true,
-                      onClick: clearPendingSub,
-                    },
-                  ]
-                : []),
-            ]
+            )
+            return items
           })()}
         />
       )}
@@ -593,4 +589,177 @@ function formatMinutes(total: number): string {
   const sec = s % 60
   const pad = (n: number) => n.toString().padStart(2, '0')
   return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`
+}
+
+/** Loader con mensajes rotatorios que reflejan las tres fases reales
+ * del pipeline: (1) providers en paralelo, (2) filtros anti-basura,
+ * (3) sondeo de seeders. El user ve que "está pasando algo" en vez
+ * de un "Buscando…" estático. Los mensajes rotan cada 1.8s para no
+ * marear. */
+function TorrentSearchLoader() {
+  const messages = [
+    'Consultando indexadores (YTS, PirateBay, Knaben)\u2026',
+    'Filtrando series de TV, CAMs y torrents muertos\u2026',
+    'Refinando resultados por calidad y seeders\u2026',
+  ]
+  const [msgIdx, setMsgIdx] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setMsgIdx((i) => (i + 1) % messages.length)
+    }, 1800)
+    return () => window.clearInterval(id)
+  }, [messages.length])
+  return (
+    <div className="flex flex-col items-center justify-center rounded-lg border border-hairline bg-surface px-6 py-12">
+      <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+      <p className="mt-4 text-[14px] font-medium text-ink">
+        {messages[msgIdx]}
+      </p>
+      <p className="mt-1 text-[11px] text-muted">
+        Los indexadores tardan unos segundos. Consultamos varios en
+        paralelo y luego descartamos la basura antes de mostrarte la lista.
+      </p>
+    </div>
+  )
+}
+
+/**
+ * Línea de estado por provider (Fase 1b). Formato compacto tipo
+ * `knaben ✓ 34 · apibay ✗ timeout · yts ✓ 5`, sin ruido: solo el
+ * nombre, un tick / cruz, y el número o el motivo. Se pinta en la
+ * cabecera de la vista para que el user pueda leerla de un vistazo
+ * sin bloquear la lista de resultados.
+ *
+ * Diseño intencional: pequeño (12px), muted, tabular-nums para que
+ * los conteos alineen entre búsquedas consecutivas. No pintamos
+ * `elapsed_ms` por defecto para no saturar; el tooltip del span lo
+ * expone si el user pasa el ratón.
+ */
+function ProviderStatusLine({ providers }: { providers: ProviderStatus[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] tabular-nums text-dim">
+      {providers.map((p) => {
+        const cached = p.from_cache === true
+        const tooltip = p.ok
+          ? `${p.hits} hits en ${p.elapsed_ms} ms${p.retried ? ' (con retry)' : ''}${cached ? ' · caché' : ''}`
+          : `${p.error ?? 'error'} · ${p.elapsed_ms} ms`
+        return (
+          <span key={p.name} title={tooltip} className="flex items-center gap-1">
+            <span className="text-muted">{p.name}</span>
+            {p.ok ? (
+              <span className={cached ? 'text-info' : 'text-good'}>
+                {cached ? '↺' : '✓'} {p.hits}
+              </span>
+            ) : (
+              <span className="text-danger">✗ {p.error ?? 'error'}</span>
+            )}
+            {p.retried && (
+              <span className="text-warn" title="Reintento aplicado">
+                ↻
+              </span>
+            )}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Panel de estado vacío (Fase 4b — audit).
+ *
+ * En vez del genérico "Sin resultados", distinguimos tres casos:
+ *
+ *   1. Peli reciente / futura (release_date dentro de los últimos ~10
+ *      semanas o en el futuro) → mensaje "en cines, sin releases
+ *      digitales todavía". Es el caso más frecuente de vacío legítimo
+ *      (blockbusters recién estrenados como Spider-Man Brand New Day).
+ *   2. Todos los providers fallaron / timeout → la lista está vacía
+ *      porque no llegamos a los indexadores. Sugerimos reintentar.
+ *   3. Fallback genérico: los indexadores respondieron pero nada pasó
+ *      los filtros. Sugerimos revisar tipo/año.
+ *
+ * El objetivo es que el user entienda POR QUÉ está vacío sin pensar
+ * que la app está rota.
+ */
+function EmptyResultsPanel({
+  result,
+  onBack,
+}: {
+  result: TorrentSearchResult
+  onBack: () => void
+}) {
+  const providers = result.providers ?? []
+  const allProvidersFailed =
+    providers.length > 0 && providers.every((p) => !p.ok)
+
+  // Peli en cines o próxima: `release_date` de TMDB dentro de los
+  // últimos 70 días o en el futuro. Usamos 10 semanas ≈ 70 días: es
+  // el gap típico entre estreno en cines y ventana digital / VOD.
+  // Si no tenemos fecha (búsqueda directa, o TMDB sin datos), no
+  // podemos afirmar nada — fallback genérico.
+  const stillInCinemas = (() => {
+    if (!result.release_date) return false
+    const d = new Date(result.release_date)
+    if (Number.isNaN(d.getTime())) return false
+    const now = Date.now()
+    const seventyDaysMs = 70 * 24 * 3600 * 1000
+    return d.getTime() > now - seventyDaysMs
+  })()
+
+  const formattedDate = (() => {
+    if (!result.release_date) return null
+    const d = new Date(result.release_date)
+    if (Number.isNaN(d.getTime())) return null
+    return d.toLocaleDateString('es-ES', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    })
+  })()
+
+  const label = result.title || 'esta película'
+
+  return (
+    <div className="rounded-lg border border-hairline bg-surface p-8 text-center">
+      {stillInCinemas ? (
+        <>
+          <p className="text-[16px] text-ink">Aún no hay releases digitales.</p>
+          <p className="mt-2 text-[13px] text-body">
+            <span className="font-medium text-ink">{label}</span>{' '}
+            {formattedDate ? `se estrenó en cines el ${formattedDate}.` : 'está actualmente en cines.'}
+          </p>
+          <p className="mt-1 text-[13px] text-muted">
+            La ventana entre estreno y digital suele ser de 6-10 semanas.
+            Los grupos de scene esperan a que salga la copia limpia
+            (WEB-DL / BluRay) — cualquier cosa que aparezca antes es un
+            CAM y videodrome los filtra siempre. Vuelve en unas semanas.
+          </p>
+        </>
+      ) : allProvidersFailed ? (
+        <>
+          <p className="text-[16px] text-ink">Los indexadores no respondieron.</p>
+          <p className="mt-2 text-[13px] text-muted">
+            Todos los proveedores fallaron (timeout, red o servidor).
+            Prueba a reintentar en unos segundos.
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="text-[16px] text-ink">Sin resultados para "{label}".</p>
+          <p className="mt-2 text-[13px] text-muted">
+            Los indexadores respondieron pero nada pasó los filtros
+            (series de TV, CAMs y torrents con &lt;3 seeders se
+            descartan). Prueba otro título o revisa el año.
+          </p>
+        </>
+      )}
+      <button
+        onClick={onBack}
+        className="mt-5 rounded-full border border-hairline px-4 py-1.5 text-[13px] text-body hover:border-border-strong"
+      >
+        Volver
+      </button>
+    </div>
+  )
 }

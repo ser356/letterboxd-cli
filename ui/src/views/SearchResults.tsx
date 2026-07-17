@@ -55,6 +55,14 @@ export function SearchResults() {
 
   const openTorrents = (m: MovieHit) => {
     const y = m.release_date?.slice(0, 4)
+    // Fallback de Cinemeta: no hay TMDB id → no podemos usar la ruta
+    // `/torrents/tmdb/:id` (dispararía `get_movie_details(0)`). Vamos a
+    // búsqueda directa por título+año, que no depende de TMDB.
+    if (!m.id) {
+      const q = y ? `${m.title} ${y}` : m.title
+      nav(`/torrents/search?q=${encodeURIComponent(q)}`)
+      return
+    }
     nav(
       `/torrents/tmdb/${m.id}?title=${encodeURIComponent(m.title)}${
         y ? `&year=${y}` : ''

@@ -16,6 +16,8 @@ mod credentials;
 #[cfg(feature = "gui")]
 mod dismissed;
 #[cfg(feature = "gui")]
+mod ffmpeg;
+#[cfg(feature = "gui")]
 mod gui;
 mod keychain;
 mod letterboxd;
@@ -459,6 +461,7 @@ async fn dispatch(command: Commands) -> Result<()> {
                 imdb_id: imdb_norm,
                 tmdb_id,
                 original_language: None,
+                title_variants: Vec::new(),
             };
 
             let providers = torrents::default_providers();
@@ -471,15 +474,35 @@ async fn dispatch(command: Commands) -> Result<()> {
                 );
             }
 
-            let results = torrents::search_all(&http, &providers, &query, min_seeders, limit).await;
+            let outcome = torrents::search_all(&http, &providers, &query, min_seeders, limit).await;
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&results)?);
+                // Serializamos el outcome completo (results +
+                // providers) — el consumidor decide qué mirar.
+                println!("{}", serde_json::to_string_pretty(&outcome)?);
                 return Ok(());
             }
 
+            // Fase 1b — observabilidad: al final del listado
+            // imprimimos una línea con el estado por provider.
+            let status_line: Vec<String> = outcome
+                .providers
+                .iter()
+                .map(|s| {
+                    if s.ok {
+                        format!("{} ✓ {}", s.name, s.hits)
+                    } else {
+                        format!("{} ✗ {}", s.name, s.error.as_deref().unwrap_or("error"))
+                    }
+                })
+                .collect();
+
+            let results = outcome.results;
             if results.is_empty() {
                 println!("\n  {}", "Sin resultados con esos filtros.".dimmed());
+                if !status_line.is_empty() {
+                    println!("  {}", status_line.join(" · ").dimmed());
+                }
                 return Ok(());
             }
 
@@ -501,6 +524,9 @@ async fn dispatch(command: Commands) -> Result<()> {
                     t.source.dimmed()
                 );
                 println!("      {}", t.magnet.dimmed());
+            }
+            if !status_line.is_empty() {
+                println!("\n  {}", status_line.join(" · ").dimmed());
             }
             println!();
         }

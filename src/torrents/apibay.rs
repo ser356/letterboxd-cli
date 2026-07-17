@@ -14,9 +14,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::{
-    build_magnet, quality_from_title, release_matches_year, MovieQuery, Torrent, TorrentProvider,
-};
+use super::{build_magnet, quality_from_title, MovieQuery, Torrent, TorrentProvider};
 
 /// Categorías TPB de vídeo (200 = Video, 201 = Movies, 202 = Movies DVDR,
 /// 205 = TV shows, 207 = HD movies, 208 = HD TV, 211 = 3D). Usamos el
@@ -78,10 +76,6 @@ impl TorrentProvider for Apibay {
         Ok(hits
             .into_iter()
             .filter(|h| h.info_hash != EMPTY_HASH && !h.info_hash.is_empty())
-            .filter(|h| match q.year {
-                Some(target) => release_matches_year(&h.name, target, 1),
-                None => true,
-            })
             .filter_map(|h| {
                 let seeders = h.seeders.parse::<u32>().ok()?;
                 let leechers = h.leechers.parse::<u32>().unwrap_or(0);
@@ -95,7 +89,7 @@ impl TorrentProvider for Apibay {
                     seeders,
                     leechers,
                     quality,
-                    source: "apibay",
+                    source: "apibay".to_string(),
                     infohash: h.info_hash.to_ascii_uppercase(),
                 })
             })

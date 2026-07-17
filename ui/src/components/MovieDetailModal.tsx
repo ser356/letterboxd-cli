@@ -29,13 +29,11 @@ export function MovieDetailModal({
 }) {
   const [view, setView] = useState<MovieView | null>(null)
   const [loading, setLoading] = useState(true)
-  const [imagesReady, setImagesReady] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setView(null)
-    setImagesReady(false)
     getMovieView(rec.movie.id)
       .then((v) => {
         if (!cancelled) setView(v)
@@ -49,41 +47,14 @@ export function MovieDetailModal({
     }
   }, [rec.movie.id])
 
-  // Precarga backdrop + poster antes de mostrar el modal completo. Así
-  // no se ve el "pop" de las imágenes apareciendo con el fondo vacío.
-  // Fallback: si en 3s no cargan (imagen bloqueada, red mala), mostramos
-  // igualmente para no dejar al user esperando.
-  useEffect(() => {
-    if (loading) return
-    const posterSrc = tmdbPoster(view?.poster_path ?? rec.movie.poster_path)
-    const backdropSrc = tmdbBackdrop(view?.backdrop_path ?? null)
-    const urls = [posterSrc, backdropSrc].filter(Boolean) as string[]
-    if (urls.length === 0) {
-      setImagesReady(true)
-      return
-    }
-    let cancelled = false
-    const timeout = window.setTimeout(() => {
-      if (!cancelled) setImagesReady(true)
-    }, 3000)
-    Promise.all(
-      urls.map(
-        (url) =>
-          new Promise<void>((resolve) => {
-            const img = new Image()
-            img.onload = () => resolve()
-            img.onerror = () => resolve()
-            img.src = url
-          }),
-      ),
-    ).then(() => {
-      if (!cancelled) setImagesReady(true)
-    })
-    return () => {
-      cancelled = true
-      window.clearTimeout(timeout)
-    }
-  }, [loading, view, rec.movie.poster_path])
+  // Nota: antes se precargaba backdrop + poster antes de mostrar el
+  // modal para evitar el "pop" de imágenes; en la práctica añadía
+  // 500ms-3s de dot-loader antes de ver nada. Ahora mostramos el
+  // modal al instante con lo que `rec.movie` ya trae (título, poster,
+  // año, rating) y las imágenes se van rellenando conforme cargan.
+  // La sinopsis / géneros / backdrop llegan cuando `getMovieView`
+  // resuelve — se cachean en disco 7d, así que el segundo click a la
+  // misma peli es literalmente instantáneo.
 
   useHotkeys(
     [
@@ -109,24 +80,12 @@ export function MovieDetailModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
-      {!imagesReady ? (
-        <div
-          className="flex items-center gap-2"
-          role="status"
-          aria-label="Cargando detalles"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <span className="dot-loader" />
-          <span className="dot-loader" />
-          <span className="dot-loader" />
-        </div>
-      ) : (
-        <div
-          className="glass-strong animate-modal-in relative flex max-h-[90vh] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-hairline"
-          onClick={(e) => e.stopPropagation()}
-          role="dialog"
-          aria-modal="true"
-          aria-label={`Detalle de ${title}`}
+      <div
+        className="glass-strong animate-modal-in relative flex max-h-[90vh] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-hairline"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Detalle de ${title}`}
         >
         {/* Backdrop header */}
         <div className="relative h-[260px] w-full shrink-0 overflow-hidden bg-surface-hi">
@@ -219,9 +178,20 @@ export function MovieDetailModal({
               </p>
             )}
 
-            <p className="mt-4 whitespace-pre-line text-[14px] leading-relaxed text-body">
-              {overview ?? 'Sin sinopsis disponible.'}
-            </p>
+            {loading && !overview ? (
+              // Skeleton mientras espera TMDB. 3 barras para dar
+              // sensación de "hay texto viniendo" en vez del vacío
+              // que confunde con "sin sinopsis".
+              <div className="mt-4 space-y-2" aria-hidden>
+                <div className="h-3 w-full animate-pulse rounded bg-surface" />
+                <div className="h-3 w-11/12 animate-pulse rounded bg-surface" />
+                <div className="h-3 w-3/4 animate-pulse rounded bg-surface" />
+              </div>
+            ) : (
+              <p className="mt-4 whitespace-pre-line text-[14px] leading-relaxed text-body">
+                {overview ?? 'Sin sinopsis disponible.'}
+              </p>
+            )}
 
             <div className="mt-6 flex items-center gap-3">
               <button
@@ -241,7 +211,6 @@ export function MovieDetailModal({
           </div>
         </div>
       </div>
-      )}
     </div>
   )
 }

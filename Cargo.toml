@@ -1,6 +1,6 @@
 [package]
 name = "videodrome"
-version = "0.4.4"
+version = "1.0.0"
 edition = "2021"
 
 [[bin]]
@@ -40,9 +40,25 @@ librqbit = "8"
 tempfile = "3"
 axum = "0.8"
 tokio-util = { version = "0.7", features = ["io"] }
+which = "6"
+bytes = "1"
+# Encoding detection para SRT/VTT. `chardetng` es el detector que usa
+# Firefox (heurística estadística por frecuencia de bytes); `encoding_rs`
+# es el crate oficial del WHATWG Encoding Standard con soporte para
+# CP1252, ISO-8859-*, GBK, Big5, cyrillic, etc. Reemplazan la
+# heurística casera Latin-1-fallback en `subtitles.rs`.
+chardetng = "0.1"
+encoding_rs = "0.8"
 tauri = { version = "2", features = [], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+
+# Windows: lectura del registro para localizar VLC.exe si no está en
+# PATH ni en las rutas estándar (`Program Files\VideoLAN\VLC`). El
+# instalador oficial de VLC deja `HKLM\SOFTWARE\VideoLAN\VLC` con la
+# ruta del binario como valor por defecto; scoop/choco no siempre.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

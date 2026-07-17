@@ -30,13 +30,54 @@ pub struct Config {
 }
 
 fn load_dotenv() {
-    if let Some(home) = dirs::home_dir() {
-        let env_path = home.join(".config").join("videodrome").join(".env");
-        if env_path.exists() {
-            dotenvy::from_path(&env_path).ok();
+    // Prioridad de rutas del `.env` (Fase G del audit Windows):
+    //   1. `dirs::config_dir()` — la ruta canónica del SO:
+    //        * macOS   → ~/Library/Application Support/videodrome
+    //        * Linux   → ~/.config/videodrome
+    //        * Windows → %APPDATA%\videodrome
+    //      Es donde `credentials.rs` y todos los demás módulos
+    //      escriben su estado (`credentials.json`, caches, etc.).
+    //   2. `~/.config/videodrome/.env` — ruta LEGADA. Se mantiene
+    //      por retrocompatibilidad con instalaciones previas al
+    //      audit; en Windows se traducía a `C:\Users\X\.config\...`,
+    //      que quedaba huérfana respecto al resto de la config
+    //      (`%APPDATA%\videodrome\`). NO lo migramos automáticamente
+    //      para no tocar ficheros del user sin permiso — si existe,
+    //      se carga; el user puede moverlo cuando quiera.
+    //   3. `.env` del cwd — override en desarrollo (útil para
+    //      `cargo run` con credenciales de test).
+    for candidate in dotenv_candidates() {
+        if candidate.exists() {
+            dotenvy::from_path(&candidate).ok();
         }
     }
     dotenvy::dotenv().ok();
+}
+
+/// Rutas donde buscar el `.env`, en orden de prioridad. Expuesta
+/// como fn (no const) porque `dirs::config_dir()` es I/O implícito.
+fn dotenv_candidates() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(cfg) = dirs::config_dir() {
+        out.push(cfg.join("videodrome").join(".env"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        let legacy = home.join(".config").join("videodrome").join(".env");
+        // Evita duplicar cuando XDG_CONFIG_HOME apunta ya a
+        // ~/.config (típico en Linux).
+        if !out.contains(&legacy) {
+            out.push(legacy);
+        }
+    }
+    out
+}
+
+/// Ruta CANÓNICA del `.env` según el SO — la que citamos en los
+/// mensajes de error para que el usuario sepa dónde crearlo.
+fn canonical_env_hint() -> String {
+    dirs::config_dir()
+        .map(|d| d.join("videodrome").join(".env").display().to_string())
+        .unwrap_or_else(|| "~/.config/videodrome/.env".to_string())
 }
 
 /// Carga las variables desde `.env` (global y local).
@@ -90,11 +131,14 @@ impl Config {
 
         let client_id = resolve("LETTERBOXD_CLIENT_ID", keychain::CLIENT_ID)
             .or_else(|| BAKED_CLIENT_ID.map(|s| s.to_string()))
-            .context(
-                "LETTERBOXD_CLIENT_ID no est\u{e1} definida y el binario no lleva \
-                 credenciales bakeadas. Define LETTERBOXD_CLIENT_ID en el \
-                 entorno o en `~/.config/videodrome/.env`.",
-            )?;
+            .with_context(|| {
+                format!(
+                    "LETTERBOXD_CLIENT_ID no est\u{e1} definida y el binario no lleva \
+                     credenciales bakeadas. Define LETTERBOXD_CLIENT_ID en el \
+                     entorno o en `{}`.",
+                    canonical_env_hint()
+                )
+            })?;
         let client_secret = resolve("LETTERBOXD_CLIENT_SECRET", keychain::CLIENT_SECRET)
             .or_else(|| BAKED_CLIENT_SECRET.map(|s| s.to_string()))
             .unwrap_or_default();
@@ -112,11 +156,14 @@ impl Config {
 
         let tmdb_bearer_token = resolve("TMDB_BEARER_TOKEN", keychain::TMDB_BEARER_TOKEN)
             .or_else(|| BAKED_TMDB_BEARER.map(|s| s.to_string()))
-            .context(
-                "TMDB_BEARER_TOKEN no est\u{e1} definida y el binario no lleva \
-                 credenciales bakeadas. Define TMDB_BEARER_TOKEN en el \
-                 entorno o en `~/.config/videodrome/.env`.",
-            )?;
+            .with_context(|| {
+                format!(
+                    "TMDB_BEARER_TOKEN no est\u{e1} definida y el binario no lleva \
+                     credenciales bakeadas. Define TMDB_BEARER_TOKEN en el \
+                     entorno o en `{}`.",
+                    canonical_env_hint()
+                )
+            })?;
 
         Ok(Self {
             client_id,

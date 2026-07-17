@@ -79,36 +79,43 @@ impl TorrentProvider for Torznab {
     }
 
     async fn search(&self, http: &reqwest::Client, q: &MovieQuery) -> Result<Vec<Torrent>> {
-        // Preferimos búsqueda por imdbid (más precisa). Torznab espera el ID
-        // sin el prefijo "tt".
-        let (t_param, extra) = match q.imdb_id.as_deref() {
-            Some(id) => ("movie", format!("&imdbid={}", id.trim_start_matches("tt"))),
-            None => ("search", String::new()),
-        };
-
+        // Fase 3c — matching por ID cuando el indexer lo soporta.
+        // Torznab espera el ID sin el prefijo "tt".
+        //
+        // Estrategia:
+        //   1. Si tenemos `imdb_id`, intentar `t=movie&imdbid=<id>`.
+        //   2. Si el server devuelve HTTP error (algunos Jackett /
+        //      Prowlarr viejos no exponen `movie` caps), caer a
+        //      `t=search&q=<title>`.
+        //   3. Sin `imdb_id`, ir directamente a `t=search`.
+        //
         // Política unificada con Knaben/Apibay: el año NUNCA va en la
-        // query — los grupos etiquetan el año del estreno original y no
-        // el USA que TMDB reporta, así "Funny Games 2008" devuelve
-        // basura. El indexador de detrás filtra por título + imdbid.
-        let mut url = format!(
-            "{}?t={}&apikey={}&q={}",
-            self.url.trim_end_matches('?'),
-            t_param,
-            urlencoding::encode(&self.apikey),
-            urlencoding::encode(q.title.trim()),
-        );
-        url.push_str(&extra);
-
-        let body = http
-            .get(&url)
-            .send()
-            .await
-            .context("Error de red hacia Torznab")?
-            .error_for_status()
-            .context("Torznab devolvió error HTTP")?
-            .text()
-            .await
-            .context("Error al leer respuesta de Torznab")?;
+        // query — los grupos etiquetan el año del estreno original y
+        // no el USA que TMDB reporta, así "Funny Games 2008" devuelve
+        // basura.
+        let body = if let Some(id) = q.imdb_id.as_deref() {
+            match self
+                .fetch(
+                    http,
+                    "movie",
+                    q.title.trim(),
+                    Some(id.trim_start_matches("tt")),
+                )
+                .await
+            {
+                Ok(body) => body,
+                Err(_movie_err) => {
+                    // Fallback silencioso: no propagamos el error de
+                    // capability. El caller de `search_all` recibirá
+                    // resultados del `t=search` (o Err de ese segundo
+                    // intento, que sí es genuino) — la telemetría de
+                    // ProviderStatus captura ambas cosas.
+                    self.fetch(http, "search", q.title.trim(), None).await?
+                }
+            }
+        } else {
+            self.fetch(http, "search", q.title.trim(), None).await?
+        };
 
         let rss: Rss = quick_xml::de::from_str(&body).context("Error al parsear XML de Torznab")?;
 
@@ -154,11 +161,46 @@ impl TorrentProvider for Torznab {
                 seeders,
                 leechers,
                 quality,
-                source: "torznab",
+                source: "torznab".to_string(),
                 infohash,
             });
         }
 
         Ok(out)
+    }
+}
+
+impl Torznab {
+    /// Pega a un endpoint Torznab con los params dados. `t_param` es
+    /// `"movie"` o `"search"`; `imdbid` (sin `tt`) se añade cuando
+    /// aplica. Devuelve el body XML crudo.
+    async fn fetch(
+        &self,
+        http: &reqwest::Client,
+        t_param: &str,
+        query: &str,
+        imdbid: Option<&str>,
+    ) -> Result<String> {
+        let mut url = format!(
+            "{}?t={}&apikey={}&q={}",
+            self.url.trim_end_matches('?'),
+            t_param,
+            urlencoding::encode(&self.apikey),
+            urlencoding::encode(query),
+        );
+        if let Some(id) = imdbid {
+            url.push_str("&imdbid=");
+            url.push_str(id);
+        }
+
+        http.get(&url)
+            .send()
+            .await
+            .context("Error de red hacia Torznab")?
+            .error_for_status()
+            .context("Torznab devolvi\u{f3} error HTTP")?
+            .text()
+            .await
+            .context("Error al leer respuesta de Torznab")
     }
 }

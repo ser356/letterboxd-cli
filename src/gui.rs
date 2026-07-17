@@ -30,16 +30,45 @@ use crate::dismissed::{self, DismissedEntry};
 use crate::letterboxd::LetterboxdClient;
 use crate::preferences::{self, Preferences};
 use crate::progress::Progress;
-use crate::recommend::{build_recommendations, Recommendation};
+use crate::recommend::{build_candidate_pool, enrich_batch, Recommendation};
 use crate::stream::{self, StreamHandle, StreamStats};
 use crate::subtitles::{self, Subtitle};
 use crate::tmdb::{MovieView, TmdbClient, TmdbMovie};
 use crate::torrents::{
-    self, release_starts_with, split_trailing_year, AudioHint, MovieQuery, Torrent,
+    self, merge_provider_statuses, release_starts_with, split_trailing_year, AudioHint, MovieQuery,
+    ProviderStatus, Torrent,
 };
 
 const SEARCH_CACHE_FILE: &str = "search_cache.json";
 const SEARCH_CACHE_TTL_SECS: u64 = 24 * 3600;
+
+/// Fase 4a — caché de resultados de búsqueda de torrents.
+///
+/// Es un caché DISTINTO del `search_cache.json` de arriba (que
+/// guarda los hits de `search_movies_tmdb`, el buscador de TMDB por
+/// texto que puebla la vista Search). Este es el resultado ya
+/// enriquecido de `search_torrents_by_tmdb` / `search_torrents_direct`
+/// — el sondeo caro a los 4 providers.
+///
+/// Política:
+///   * TTL 30 min para resultados con torrents (`ttl_hits`).
+///   * TTL 5 min para resultados vacíos (`ttl_empty`). El resultado
+///     vacío también se cachea a propósito: evita martillear los
+///     providers cuando el user vuelve una y otra vez a una peli
+///     sin releases (típicamente estrenos que aún no han salido en
+///     digital — ver Fase 4b para el mensaje al user).
+///   * Key = `tt<imdb_id>` si TMDB nos lo dio, o `"direct:" +
+///     norm(title) + ":year"` para búsquedas directas. Estable
+///     entre sesiones.
+const TORRENT_CACHE_FILE: &str = "torrent_search_cache.json";
+const TORRENT_CACHE_TTL_HITS: u64 = 30 * 60;
+const TORRENT_CACHE_TTL_EMPTY: u64 = 5 * 60;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CachedTorrentSearch {
+    timestamp: u64,
+    result: TorrentSearchResult,
+}
 
 /// Entrada del cache de `search_movies_tmdb` (persistido en disco).
 /// La key es la query normalizada (trim + lowercase). El valor es el
@@ -92,6 +121,94 @@ fn normalize_query(q: &str) -> String {
     q.trim().to_lowercase()
 }
 
+// ── Caché de búsqueda de torrents (Fase 4a) ─────────────────────────────────
+
+fn torrent_cache_path() -> anyhow::Result<PathBuf> {
+    Ok(config_dir()?.join(TORRENT_CACHE_FILE))
+}
+
+fn load_torrent_cache() -> HashMap<String, CachedTorrentSearch> {
+    let Ok(path) = torrent_cache_path() else {
+        return HashMap::new();
+    };
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_torrent_cache(cache: &HashMap<String, CachedTorrentSearch>) {
+    if let Ok(path) = torrent_cache_path() {
+        if let Ok(json) = serde_json::to_string(cache) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
+
+/// Key estable para el caché de torrents. Prefiere el `imdb_id`
+/// (canónico, cross-idioma); si no lo hay, cae a `direct:<norm>:<year>`.
+fn torrent_cache_key(imdb_id: Option<&str>, title: &str, year: Option<u16>) -> String {
+    if let Some(id) = imdb_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return id.to_string();
+    }
+    let norm = normalize_query(title);
+    match year {
+        Some(y) => format!("direct:{norm}:{y}"),
+        None => format!("direct:{norm}:-"),
+    }
+}
+
+/// TTL aplicable a una entrada según si tiene resultados o no.
+fn torrent_cache_ttl(entry: &CachedTorrentSearch) -> u64 {
+    if entry.result.results.is_empty() {
+        TORRENT_CACHE_TTL_EMPTY
+    } else {
+        TORRENT_CACHE_TTL_HITS
+    }
+}
+
+/// Devuelve `Some(result)` si el caché tiene una entrada fresca para
+/// la key dada. Marca los providers como `from_cache = true` para que
+/// la UI pueda diferenciarlos del sondeo vivo.
+fn torrent_cache_get_fresh(
+    cache: &HashMap<String, CachedTorrentSearch>,
+    key: &str,
+) -> Option<TorrentSearchResult> {
+    let entry = cache.get(key)?;
+    let age = now_unix().saturating_sub(entry.timestamp);
+    if age > torrent_cache_ttl(entry) {
+        return None;
+    }
+    let mut result = entry.result.clone();
+    for p in &mut result.providers {
+        p.from_cache = true;
+    }
+    Some(result)
+}
+
+/// Persiste (o refresca) una entrada en el caché de torrents.
+fn torrent_cache_put(
+    cache: &mut HashMap<String, CachedTorrentSearch>,
+    key: String,
+    result: &TorrentSearchResult,
+) {
+    // Guardamos una copia CON `from_cache = false` en los providers
+    // — el flag se aplica solo cuando se lee, no cuando se guarda.
+    // (Un round-trip vía caché seguiría marcándolos correctamente).
+    let mut snapshot = result.clone();
+    for p in &mut snapshot.providers {
+        p.from_cache = false;
+    }
+    cache.insert(
+        key,
+        CachedTorrentSearch {
+            timestamp: now_unix(),
+            result: snapshot,
+        },
+    );
+    save_torrent_cache(cache);
+}
+
 /// Estado global compartido con los comandos Tauri.
 pub struct AppState {
     config: Arc<Mutex<Config>>,
@@ -103,15 +220,76 @@ pub struct AppState {
     /// Caché en memoria (y persistida) de `search_movies_tmdb`. Evita
     /// repetir el sondeo a providers cuando el user repite una búsqueda.
     search_cache: Arc<Mutex<HashMap<String, CachedSearch>>>,
+    /// Caché en memoria (y persistida) del sondeo de torrents
+    /// (Fase 4a del audit). TTL 30 min para hits, 5 min para vacío.
+    /// Al arrancar se lee de disco (`torrent_search_cache.json`) para
+    /// que la primera visita a Torrents tras reabrir la app sea
+    /// instantánea si estaba cacheada.
+    torrent_cache: Arc<Mutex<HashMap<String, CachedTorrentSearch>>>,
+    /// Pool de recomendaciones ya computadas para la sesión actual.
+    /// `get_recommendations_page` sirve slices de aquí. Se invalida
+    /// cuando cambia el `min_rating` o el user pulsa "Refrescar".
+    /// TTL 1h para que la próxima apertura de la vista no vuelva a
+    /// gastar 5-10s recomputando toda la pipeline (TMDB recs + LB
+    /// ratings) si el user ya lo vio recientemente.
+    recs_pool: Arc<Mutex<Option<RecsPool>>>,
 }
 
-/// Un stream vivo + el handle del reproductor externo. Guardamos el
-/// `PlayerHandle` entero (no solo el flag `alive`) para poder cerrar
-/// VLC activamente desde `stop_stream` — pulsar "Detener" en la UI
-/// siempre debe cerrar VLC, no solo parar la descarga.
+/// Pool de recomendaciones cacheado en memoria, construido de forma
+/// perezosa por lotes. La primera petición hace los pasos 1-3 del
+/// pipeline (historial + TMDB recs + pre-score) para llenar
+/// `candidates` — es barato, ~1-2s con caché caliente de TMDB. Cada
+/// página del scroll infinito LB-enriquece el siguiente lote sobre
+/// `candidates` y lo apendea a `enriched`.
+///
+/// Así la primera página aparece en ~1s (10 fetches de LB) en lugar
+/// de ~10s (600 fetches), y el trabajo se difumina a medida que el
+/// user scrollea.
+struct RecsPool {
+    /// `min_rating * 10` para comparar sin lío de f32. Cuando cambia,
+    /// se invalida el pool entero.
+    min_rating_x10: u32,
+    /// Candidatos pre-scored por freq × TMDB, ya ordenados. Se llena
+    /// una vez y no cambia hasta la próxima invalidación.
+    candidates: Vec<(TmdbMovie, f32)>,
+    /// Recomendaciones ya LB-enriquecidas, apendeadas por lotes.
+    /// `enriched.len()` marca hasta dónde llega la ventana servible.
+    enriched: Vec<Recommendation>,
+    /// Índice del próximo candidato pendiente de enriquecer. Cuando
+    /// `next_to_enrich == candidates.len()` se acabó el pool.
+    next_to_enrich: usize,
+    /// Set de `snapshot_start` de batches que están AHORA mismo
+    /// enriqueciéndose (fuera del lock, en LB I/O). Si una segunda
+    /// request llega mientras un enrich sigue vivo, ve su
+    /// snapshot_start en este set y salta el enrich (no vuelve a
+    /// pedir el mismo rango a Letterboxd). Sin esto, dos requests
+    /// concurrentes contra el mismo cursor gastaban 2× llamadas a
+    /// LB para el mismo trabajo, aunque el resultado del segundo
+    /// se descartaba por el guard de `next_to_enrich`.
+    in_flight: std::collections::HashSet<usize>,
+    computed_at: u64,
+}
+
+const RECS_POOL_TTL_SECS: u64 = 3600;
+/// Tamaño máximo del pool de candidatos que pre-scoreamos. Techo
+/// del scroll infinito: si el user llega al final, hemos servido
+/// todo lo que TMDB nos ha dado como plausible.
+const RECS_POOL_CAP: usize = 500;
+/// Tamaño mínimo de un batch de LB-enrich. Si el frontend pide una
+/// página de 10, enriquecemos 10 (no overshooteamos: el orden
+/// dentro del batch se ordena por score final, cross-batch se
+/// preserva por TMDB pre-score — buena aproximación).
+const RECS_BATCH_MIN: usize = 10;
+
+/// Un stream vivo + (opcionalmente) el handle del reproductor externo.
+/// `player = Some` es la ruta legacy con VLC como proceso hijo — la
+/// UI polla `alive` para saber cuándo el user cerró VLC. `player =
+/// None` es el modo player HTML embebido (view `Player.tsx`): la vida
+/// del stream la controla el frontend con `stop_stream` explícito, y
+/// `stream_stats.alive` es siempre `true` mientras el slot exista.
 struct ActiveStream {
     handle: StreamHandle,
-    player: stream::PlayerHandle,
+    player: Option<stream::PlayerHandle>,
 }
 
 /// Progress no-op: la GUI no necesita ver las etapas por ahora.
@@ -152,6 +330,11 @@ async fn logout(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
     state.search_cache.lock().await.clear();
+    // También el pool de recomendaciones en memoria — si no, el
+    // siguiente `get_recommendations_page` (misma sesión, otro
+    // user) serviría las recs computadas con el historial anterior
+    // hasta que expirase el TTL de 1h.
+    *state.recs_pool.lock().await = None;
 
     let mut cfg = state.config.lock().await;
     cfg.refresh_token = None;
@@ -198,49 +381,181 @@ async fn get_username(state: State<'_, AppState>) -> Result<String, String> {
 
 // ---------- Recomendaciones ----------
 
+/// Página de recomendaciones para el scroll infinito. La primera vez
+/// (o tras `force_refresh = true` o cambio de `min_rating`) computa
+/// un pool grande (`RECS_POOL_SIZE`) y lo cachea en memoria; las
+/// siguientes llamadas sirven un slice del pool sin volver a pegar a
+/// TMDB/Letterboxd. Al llegar al final, `has_more = false` — el
+/// frontend deja de disparar fetches.
+///
+/// `dismissed` se filtra en cada request para que descartar una peli
+/// en tiempo real la haga desaparecer sin recomputar el pool.
 #[tauri::command]
-async fn get_recommendations(
-    count: usize,
+async fn get_recommendations_page(
+    offset: usize,
+    limit: usize,
     min_rating: f32,
+    force_refresh: bool,
     state: State<'_, AppState>,
-) -> Result<Vec<Recommendation>, String> {
-    let config = state.config.lock().await.clone();
-    let token = auth::get_access_token(&state.http, &config)
-        .await
-        .map_err(|e| e.to_string())?;
-    let lb = LetterboxdClient::new(&state.http, &token);
-    let tmdb = TmdbClient::new(&state.http, &config.tmdb_bearer_token);
+) -> Result<RecsPage, String> {
+    let key = (min_rating * 10.0).round() as u32;
+    let now = now_unix();
 
-    // Sobre-pedimos `count + dismissed_len` (con techo) para que el
-    // usuario reciba siempre `count` resultados aunque haya descartado
-    // varias películas — la lista no "encoge" al ir diciendo no sugerir.
-    // El techo evita ampliar sin límite si el user ha descartado 500.
+    // ¿Necesitamos construir/reconstruir el pool de candidatos?
+    // (No los "enriched" — esos se construyen incrementalmente por
+    // lote a medida que el scroll los va necesitando.)
+    let needs_rebuild = {
+        let guard = state.recs_pool.lock().await;
+        force_refresh
+            || match guard.as_ref() {
+                Some(p) => {
+                    p.min_rating_x10 != key
+                        || now.saturating_sub(p.computed_at) >= RECS_POOL_TTL_SECS
+                }
+                None => true,
+            }
+    };
+
+    // Precomputamos config + clientes fuera del lock del pool.
+    let config = state.config.lock().await.clone();
+
+    if needs_rebuild {
+        let token = auth::get_access_token(&state.http, &config)
+            .await
+            .map_err(|e| e.to_string())?;
+        let lb = LetterboxdClient::new(&state.http, &token);
+        let tmdb = TmdbClient::new(&state.http, &config.tmdb_bearer_token);
+
+        // Solo pasos 1-3 del pipeline: pre-score candidatos por
+        // freq × TMDB. NO tocamos Letterboxd todavía — eso se
+        // difiere al bucle de enriquecimiento incremental abajo.
+        let candidates = build_candidate_pool(&lb, &tmdb, min_rating, RECS_POOL_CAP, &Silent)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        *state.recs_pool.lock().await = Some(RecsPool {
+            min_rating_x10: key,
+            candidates,
+            enriched: Vec::new(),
+            next_to_enrich: 0,
+            in_flight: std::collections::HashSet::new(),
+            computed_at: now,
+        });
+    }
+
+    // Enriquecimiento incremental: LB-hydrate hasta que tengamos
+    // `offset + limit` items (con margen ligero por dismisses).
+    // Cada iteración enriquece un batch pequeño (`limit` items) en
+    // paralelo con concurrencia 40 en `enrich_batch`. Para una
+    // primera página de 10 son ~200-500ms en total, en vez de los
+    // 5-10s del build_recommendations monolítico.
+    loop {
+        // Snapshot del estado bajo lock corto para decidir si hay
+        // que enriquecer más y qué slice de candidatos coger.
+        // Devolvemos también `snapshot_start` para poder detectar
+        // si otro request avanzó el cursor mientras hacíamos LB.
+        //
+        // Si el snapshot_start ya está en `in_flight`, otro request
+        // está enriqueciendo exactamente ese rango — salimos del
+        // loop y servimos lo que ya tengamos: cuando el otro
+        // termine, la próxima paginación verá el pool actualizado.
+        // Esto evita 2× llamadas a LB para el mismo trabajo.
+        let batch_to_enrich: Option<(usize, Vec<(TmdbMovie, f32)>)> = {
+            let mut guard = state.recs_pool.lock().await;
+            let pool = guard.as_mut().expect("just rebuilt");
+            let target = offset + limit + RECS_BATCH_MIN; // margen anti-dismiss
+            if pool.enriched.len() >= target || pool.next_to_enrich >= pool.candidates.len() {
+                None
+            } else {
+                let start = pool.next_to_enrich;
+                if pool.in_flight.contains(&start) {
+                    None
+                } else {
+                    let batch_size = limit.max(RECS_BATCH_MIN);
+                    let end = (start + batch_size).min(pool.candidates.len());
+                    pool.in_flight.insert(start);
+                    Some((start, pool.candidates[start..end].to_vec()))
+                }
+            }
+        };
+        let Some((snapshot_start, batch)) = batch_to_enrich else {
+            break;
+        };
+        // LB-enrich fuera del lock (network I/O). El slot está
+        // reservado en `in_flight`, así que ningún request concurrente
+        // pedirá el mismo rango mientras estemos aquí.
+        let token = auth::get_access_token(&state.http, &config)
+            .await
+            .map_err(|e| e.to_string())?;
+        let lb = LetterboxdClient::new(&state.http, &token);
+        let batch_len = batch.len();
+        let new_recs = enrich_batch::<Silent>(&lb, &batch, None).await;
+        // Volvemos a coger el lock para apendear y liberar el slot
+        // `in_flight`. Solo aplicamos si `next_to_enrich` NO se
+        // movió desde el snapshot: si otro request logró avanzar
+        // pese al in_flight (p. ej. tras un logout que reset-eó el
+        // pool y otro thread lo repobló), tiramos el trabajo.
+        let mut guard = state.recs_pool.lock().await;
+        let pool = guard.as_mut().expect("still alive");
+        pool.in_flight.remove(&snapshot_start);
+        if pool.next_to_enrich == snapshot_start {
+            pool.enriched.extend(new_recs);
+            pool.next_to_enrich += batch_len;
+        }
+    }
+
+    // Filtro de dismissed sobre el pool cacheado. Se hace en cada
+    // request para reflejar dismiss/undismiss al instante sin
+    // invalidar la caché entera.
     let dismissed = dismissed::load();
     let dismissed_ids = dismissed.ids();
-    let extra = dismissed_ids.len().min(count * 5);
-    let fetch = count.saturating_add(extra);
+    let guard = state.recs_pool.lock().await;
+    let pool = guard.as_ref().expect("just rebuilt or was fresh");
+    let filtered: Vec<Recommendation> = pool
+        .enriched
+        .iter()
+        .filter(|r| !dismissed_ids.contains(&r.movie.id))
+        .cloned()
+        .collect();
 
-    let mut recs = build_recommendations(&lb, &tmdb, fetch, min_rating, &Silent)
-        .await
-        .map_err(|e| e.to_string())?;
-    recs.retain(|r| !dismissed_ids.contains(&r.movie.id));
-    recs.truncate(count);
-    Ok(recs)
+    let end = (offset + limit).min(filtered.len());
+    let items = filtered
+        .get(offset..end)
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
+    // `has_more` refleja tanto items ya-enriched no servidos como
+    // candidatos pendientes de enriquecer. Solo cuando hemos
+    // agotado el pool devolvemos false.
+    let has_more = end < filtered.len() || pool.next_to_enrich < pool.candidates.len();
+    Ok(RecsPage {
+        items,
+        has_more,
+        total: filtered.len(),
+    })
 }
 
-/// Marca una película como "no sugerir" y devuelve la lista de
-/// recomendaciones ya refrescada, del mismo tamaño (`count`) que la
-/// que estaba viendo el usuario. Así el frontend puede reemplazar en
-/// caliente sin recargar la vista.
+#[derive(Serialize)]
+struct RecsPage {
+    items: Vec<Recommendation>,
+    /// Si `true`, todavía hay más elementos disponibles para paginar
+    /// con `offset += limit`. Cuando `has_more = false` el frontend
+    /// deja de disparar fetches — hemos agotado el pool computado.
+    has_more: bool,
+    /// Tamaño total de recomendaciones disponibles tras filtro de
+    /// dismissed. Útil para mostrar "N pelis disponibles" opcional.
+    total: usize,
+}
+
+/// Marca una película como "no sugerir". El frontend la elimina de la
+/// lista visible al instante (sin recargar); el servidor solo persiste
+/// el `dismissed.json` para que las próximas páginas del scroll
+/// infinito la filtren via `get_recommendations_page`.
 #[tauri::command]
 async fn dismiss_recommendation(
     tmdb_id: u64,
     title: String,
     poster_path: Option<String>,
-    count: usize,
-    min_rating: f32,
-    state: State<'_, AppState>,
-) -> Result<Vec<Recommendation>, String> {
+) -> Result<(), String> {
     let mut store = dismissed::load();
     store.insert(DismissedEntry {
         id: tmdb_id,
@@ -249,7 +564,7 @@ async fn dismiss_recommendation(
         dismissed_at: now_unix(),
     });
     dismissed::save(&store).map_err(|e| e.to_string())?;
-    get_recommendations(count, min_rating, state).await
+    Ok(())
 }
 
 /// Restaura una película descartada (la borra del `dismissed.json`).
@@ -281,9 +596,16 @@ async fn get_movie_view(
 ) -> Result<Option<MovieView>, String> {
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
     let tmdb = TmdbClient::new(&state.http, &bearer);
-    tmdb.get_movie_view(tmdb_id)
+    let start = std::time::Instant::now();
+    let out = tmdb
+        .get_movie_view(tmdb_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    eprintln!(
+        "[gui] get_movie_view tmdb_id={tmdb_id} en {}ms",
+        start.elapsed().as_millis()
+    );
+    out
 }
 
 /// Búsqueda TMDB por texto libre. Alimenta la pantalla intermedia de la
@@ -291,10 +613,12 @@ async fn get_movie_view(
 /// antes de decidir de cuál quiere torrents. Evita el problema de "he
 /// pedido una peli y me han salido resultados de otra distinta".
 ///
-/// Cada hit de TMDB se cruza en paralelo con los providers de torrents:
-/// si ninguno devuelve nada con seeders ≥ 1, la película se descarta —
-/// no tiene sentido enseñar carátulas de pelis que después no vamos a
-/// poder ver. Se preserva el orden de relevancia de TMDB.
+/// Cada hit de TMDB se cruza en paralelo con los providers de torrents
+/// SOLO para poblar `torrent_count` (informativo). NO se filtra por
+/// `torrent_count > 0`: si el sondeo no encontró nada se muestra la
+/// peli igualmente con un aviso — así pelis oscuras (Salò, cine
+/// europeo raro, docs) no desaparecen del catálogo por un mal día
+/// de un provider.
 #[tauri::command]
 async fn search_movies_tmdb(
     query: String,
@@ -328,8 +652,11 @@ async fn search_movies_tmdb(
 
     // Sondeo ligero por película en paralelo (concurrencia 6 para no
     // saturar Knaben/YTS). Pedimos solo 5 resultados por película, lo
-    // justo para saber si hay algo con seeders. min_seeders=1 filtra
-    // torrents muertos ya en el provider.
+    // justo para saber si hay algo. min_seeders=0 acepta cualquier
+    // torrent (incluso muertos) — el filtro real de seeders (min 3)
+    // se aplica en la vista de Torrents al hacer click. Esto evita
+    // que pelis obscuras (Salò, cine europeo raro, docs) desaparezcan
+    // del catálogo por un mal día del provider.
     let checks = movies.into_iter().enumerate().map(|(idx, m)| {
         let providers = providers.clone();
         let http = http.clone();
@@ -337,18 +664,23 @@ async fn search_movies_tmdb(
             let q = MovieQuery {
                 title: m.title.clone(),
                 year: m.year(),
-                imdb_id: None,
-                tmdb_id: Some(m.id),
+                imdb_id: m.imdb_id.clone(),
+                tmdb_id: if m.id > 0 { Some(m.id) } else { None },
                 original_language: None,
+                title_variants: Vec::new(),
             };
-            let list = torrents::search_all(&http, &providers, &q, 1, 5).await;
-            (idx, m, list.len() as u32)
+            let list = torrents::search_all(&http, &providers, &q, 0, 5).await;
+            (idx, m, list.results.len() as u32)
         }
     });
 
+    // NO filtramos por torrent_count > 0: mostramos TODAS las pelis
+    // que TMDB devolvió. Si el user hace click en una sin torrents
+    // (torrent_count == 0), la vista de Torrents ya muestra un
+    // mensaje adecuado con opciones. Mejor que desaparecer la peli
+    // del catálogo silenciosamente.
     let mut results: Vec<(usize, TmdbMovie, u32)> = futures::stream::iter(checks)
         .buffer_unordered(6)
-        .filter(|(_, _, n)| futures::future::ready(*n > 0))
         .collect()
         .await;
 
@@ -397,7 +729,7 @@ struct MovieHit {
 
 /// Datos enriquecidos que la GUI muestra sobre la película en la vista de
 /// torrents (título original + IMDb + idioma + runtime) además de la lista.
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TorrentSearchResult {
     title: String,
     imdb_id: Option<String>,
@@ -408,11 +740,24 @@ struct TorrentSearchResult {
     /// venimos de TMDB o TMDB no la expone.
     runtime_minutes: Option<u32>,
     results: Vec<TorrentDto>,
+    /// Estado por provider (Fase 1b — observabilidad). La UI pinta una
+    /// línea tipo `knaben ✓ 34 · apibay ✗ timeout · yts ✓ 5` para que el
+    /// user vea si la lista es corta por filtros o porque un provider
+    /// se cayó. `[]` cuando no se ha lanzado ninguna búsqueda (p.ej.
+    /// futura ruta 100% cacheada — Fase 4).
+    #[serde(default)]
+    providers: Vec<ProviderStatus>,
+    /// Fecha de estreno TMDB (`YYYY-MM-DD`). Fase 4b: la UI la usa
+    /// para el mensaje "todavía en cines" cuando `results` está vacío
+    /// y la fecha es reciente o futura. `None` en búsquedas directas
+    /// (sin TMDB) o si TMDB no la expone.
+    #[serde(default)]
+    release_date: Option<String>,
 }
 
 /// Torrent con el idioma de audio inferido (para la bandera en la UI).
 /// Espejo de `Torrent` + `audio`.
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TorrentDto {
     title: String,
     magnet: String,
@@ -420,7 +765,10 @@ struct TorrentDto {
     seeders: u32,
     leechers: u32,
     quality: Option<String>,
-    source: &'static str,
+    /// Nombre del provider (`"yts"`, `"knaben"`, ...). Antes era
+    /// `&'static str` pero se cambió a `String` en Fase 4a del audit
+    /// para poder round-tripear a través del caché en disco.
+    source: String,
     /// Código ISO 639-1 del audio inferido (`"en"`, `"es"`, `"ru"`…) o
     /// marcador especial (`"multi"`, `"unknown"`, `"dub"`).
     audio: String,
@@ -455,6 +803,15 @@ impl TorrentDto {
 /// Búsqueda a partir de una película Letterboxd (recomendación con TMDB
 /// id). Reproduce `spawn_torrents` de la TUI: resuelve detalles TMDB
 /// (título original, IMDb, idioma) antes de consultar los providers.
+///
+/// Fase 3b — recall por variantes: en vez de lanzar UNA búsqueda por
+/// título original y otra por inglés secuencialmente, construimos un
+/// conjunto de hasta 3 variantes ([original, inglés, mejor alt de
+/// TMDB]) deduplicadas por forma normalizada, y lanzamos las 3
+/// `search_all` EN PARALELO. Los resultados se mergen por infohash.
+/// Cada `MovieQuery` lleva ADEMÁS el conjunto completo de variantes
+/// como `title_variants` para que el filtro central de `search_all`
+/// acepte releases que matcheen CUALQUIERA de ellas.
 #[tauri::command]
 async fn search_torrents_by_tmdb(
     tmdb_id: u64,
@@ -465,38 +822,144 @@ async fn search_torrents_by_tmdb(
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
     let tmdb = TmdbClient::new(&state.http, &bearer);
     let details = tmdb.get_movie_details(tmdb_id).await.ok().flatten();
-    let (title, russian_title, year, imdb_id, original_language, runtime) = match details {
-        Some(d) => (
-            d.original_title
-                .or(d.fallback_title)
-                .unwrap_or(fallback_title.clone()),
-            d.russian_title,
-            d.year.or(fallback_year),
-            d.imdb_id,
-            d.original_language,
-            d.runtime,
-        ),
+
+    // Fase 4a — cache check ANTES del sondeo a providers. Key
+    // preferente: imdb_id (canónico). Si el details lookup falló y
+    // no tenemos imdb_id, caemos a `direct:norm(fallback_title):year`.
+    let imdb_key = details.as_ref().and_then(|d| d.imdb_id.clone());
+    let year_key = details.as_ref().and_then(|d| d.year).or(fallback_year);
+    let cache_key = torrent_cache_key(imdb_key.as_deref(), &fallback_title, year_key);
+    if let Some(hit) = torrent_cache_get_fresh(&*state.torrent_cache.lock().await, &cache_key) {
+        return Ok(hit);
+    }
+    let (
+        title,
+        english_title,
+        russian_title,
+        year,
+        imdb_id,
+        original_language,
+        runtime,
+        alt_titles,
+        release_date,
+    ) = match details {
+        Some(d) => {
+            // `title` = original (italiano para Salò, coreano para Parasite…).
+            // `english_title` = title en inglés de TMDB (viene en `fallback_title`
+            // porque pedimos `/movie/{id}?language=en-US`). Los indexadores
+            // (YTS/PirateBay/Knaben) INDEXAN por título inglés casi siempre —
+            // los releases se llaman `Salo.or.the.120.Days.of.Sodom.1975.*`,
+            // no `Salò.o.le.120.giornate.di.Sodoma.*`. Sin buscar por el
+            // inglés, títulos no-inglés devuelven cero o casi cero torrents.
+            let orig = d
+                .original_title
+                .clone()
+                .unwrap_or_else(|| fallback_title.clone());
+            let eng = d.fallback_title.filter(|s| !s.is_empty() && s != &orig);
+            (
+                orig,
+                eng,
+                d.russian_title,
+                d.year.or(fallback_year),
+                d.imdb_id,
+                d.original_language,
+                d.runtime,
+                d.alt_titles,
+                d.release_date,
+            )
+        }
         None => (
             fallback_title.clone(),
+            None,
             None,
             fallback_year,
             None,
             None,
             None,
+            Vec::new(),
+            None,
         ),
     };
 
     let providers = torrents::default_providers();
-    let primary = MovieQuery {
-        title: title.clone(),
-        year,
-        imdb_id: imdb_id.clone(),
-        tmdb_id: Some(tmdb_id),
-        original_language: original_language.clone(),
-    };
-    let mut list = torrents::search_all(&state.http, &providers, &primary, 1, 40).await;
 
-    // Fallback ruso, como en la TUI.
+    // Construimos el conjunto de variantes de búsqueda. El orden es
+    // importante: original primero (idioma nativo → indexers
+    // regionales), inglés segundo (scene global), alt-titles el
+    // resto. Deduplicamos por forma normalizada — dos variantes que
+    // colapsan a la misma tras `normalize_title` no aportan hits
+    // nuevos. Cap a 3 (límite del audit: ≤3 por provider para no
+    // multiplicar latencia).
+    const MAX_VARIANTS: usize = 3;
+    let mut variants: Vec<String> = Vec::new();
+    let mut seen_norm: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push_variant = |v: String, variants: &mut Vec<String>| {
+        let norm = torrents::release_name::normalize_title(&v);
+        if norm.is_empty() {
+            return;
+        }
+        if seen_norm.insert(norm) && variants.len() < MAX_VARIANTS {
+            variants.push(v);
+        }
+    };
+    push_variant(title.clone(), &mut variants);
+    if let Some(eng) = english_title.as_ref() {
+        push_variant(eng.clone(), &mut variants);
+    }
+    for alt in &alt_titles {
+        push_variant(alt.clone(), &mut variants);
+    }
+
+    // El `title_variants` que va DENTRO de cada `MovieQuery` es el
+    // conjunto completo — así el filtro central de `search_all` acepta
+    // cualquier release que matchee UNA de las variantes,
+    // independientemente de con qué `title` se lanzó la búsqueda.
+    let filter_variants = variants.clone();
+
+    // Lanzamos las búsquedas en paralelo (una por variante). Cada
+    // `search_all` interno ya paraleliza sobre providers; aquí
+    // multiplicamos por N variantes. Con 3 variantes × 4 providers
+    // salen 12 requests HTTP en flight — dentro de rangos sanos.
+    let variant_futures = variants.iter().cloned().map(|v| {
+        let q = MovieQuery {
+            title: v,
+            year,
+            imdb_id: imdb_id.clone(),
+            tmdb_id: Some(tmdb_id),
+            original_language: original_language.clone(),
+            title_variants: filter_variants.clone(),
+        };
+        let http = state.http.clone();
+        let providers = providers.clone();
+        async move { torrents::search_all(&http, &providers, &q, 3, 40).await }
+    });
+    let outcomes: Vec<torrents::SearchOutcome> = futures::future::join_all(variant_futures).await;
+
+    // Merge por infohash + consolidación de providers status.
+    use std::collections::HashMap;
+    let mut merged: HashMap<String, torrents::Torrent> = HashMap::new();
+    let mut providers_status: Vec<ProviderStatus> = Vec::new();
+    for o in outcomes {
+        providers_status = merge_provider_statuses(providers_status, o.providers);
+        for t in o.results {
+            match merged.get_mut(&t.infohash) {
+                Some(prev) if prev.seeders < t.seeders => *prev = t,
+                Some(_) => {}
+                None => {
+                    merged.insert(t.infohash.clone(), t);
+                }
+            }
+        }
+    }
+    let mut list: Vec<torrents::Torrent> = merged.into_values().collect();
+    list.sort_by_key(|t| std::cmp::Reverse(t.seeders));
+    list.truncate(40);
+
+    // Fallback ruso, como en la TUI. Solo si la lista sigue vacía
+    // tras las variantes principales. NOTA: no pasamos
+    // `title_variants` aquí — el título ruso en cirílico no matchea
+    // ninguna variante latina; usamos `release_starts_with` como
+    // filtro post-hoc (patrón `<Nombre ruso> / <Nombre original>`).
     if list.is_empty() {
         if let Some(ru) = russian_title.filter(|s| s != &title) {
             let ru_q = MovieQuery {
@@ -505,20 +968,19 @@ async fn search_torrents_by_tmdb(
                 imdb_id: imdb_id.clone(),
                 tmdb_id: Some(tmdb_id),
                 original_language: original_language.clone(),
+                title_variants: Vec::new(),
             };
-            let raw = torrents::search_all(&state.http, &providers, &ru_q, 1, 40).await;
-            // Se comparte el helper `release_starts_with` con la TUI:
-            // lowercases y quita puntuación inicial, así matchea releases
-            // como `«Titulo» ...` o `[Titulo] ...` que con un
-            // `starts_with` case-sensitive se descartaban.
-            list = raw
+            let ru_outcome = torrents::search_all(&state.http, &providers, &ru_q, 3, 40).await;
+            providers_status = merge_provider_statuses(providers_status, ru_outcome.providers);
+            list = ru_outcome
+                .results
                 .into_iter()
                 .filter(|t| release_starts_with(&t.title, &ru))
                 .collect();
         }
     }
 
-    Ok(TorrentSearchResult {
+    let result = TorrentSearchResult {
         title,
         imdb_id,
         original_language: original_language.clone(),
@@ -528,7 +990,15 @@ async fn search_torrents_by_tmdb(
             .into_iter()
             .map(|t| TorrentDto::from_torrent(t, original_language.as_deref()))
             .collect(),
-    })
+        providers: providers_status,
+        release_date,
+    };
+
+    // Fase 4a: persistimos el resultado. El TTL efectivo lo decide
+    // `torrent_cache_ttl` según si `results` está vacío (5 min) o
+    // no (30 min).
+    torrent_cache_put(&mut *state.torrent_cache.lock().await, cache_key, &result);
+    Ok(result)
 }
 
 /// Búsqueda directa: el user teclea un título en la vista Search. No pasa
@@ -540,6 +1010,13 @@ async fn search_torrents_direct(
 ) -> Result<TorrentSearchResult, String> {
     // Extrae año trailing si viene ("Funny Games 2007").
     let (title, year) = split_trailing_year(&query);
+
+    // Fase 4a — cache check.
+    let cache_key = torrent_cache_key(None, &title, year);
+    if let Some(hit) = torrent_cache_get_fresh(&*state.torrent_cache.lock().await, &cache_key) {
+        return Ok(hit);
+    }
+
     let providers = torrents::default_providers();
     let q = MovieQuery {
         title: title.clone(),
@@ -547,19 +1024,25 @@ async fn search_torrents_direct(
         imdb_id: None,
         tmdb_id: None,
         original_language: None,
+        title_variants: Vec::new(),
     };
-    let list = torrents::search_all(&state.http, &providers, &q, 1, 40).await;
-    Ok(TorrentSearchResult {
+    let list = torrents::search_all(&state.http, &providers, &q, 3, 40).await;
+    let result = TorrentSearchResult {
         title,
         imdb_id: None,
         original_language: None,
         year,
         runtime_minutes: None,
         results: list
+            .results
             .into_iter()
             .map(|t| TorrentDto::from_torrent(t, None))
             .collect(),
-    })
+        providers: list.providers,
+        release_date: None,
+    };
+    torrent_cache_put(&mut *state.torrent_cache.lock().await, cache_key, &result);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -586,15 +1069,13 @@ struct StreamInfo {
 
 #[tauri::command]
 async fn start_stream(magnet: String, state: State<'_, AppState>) -> Result<StreamInfo, String> {
-    start_stream_inner(magnet, None, None, &state).await
+    start_stream_inner(magnet, None, None, PlayerMode::Vlc, &state).await
 }
 
 /// Como `start_stream`, pero pasando explícitamente un path de subtítulo
 /// para VLC y — opcionalmente — la posición inicial en segundos para
-/// reanudar desde donde el user lo dejó. Único camino usado por la GUI
-/// actual (el diálogo previo pregunta si cargar subs y ya descarga
-/// antes de arrancar, y el prompt de resume calcula los segundos con
-/// el runtime de TMDB).
+/// reanudar desde donde el user lo dejó. Se usa desde el flujo de
+/// diálogo pre-stream cuando la preferencia es VLC.
 #[tauri::command]
 async fn start_stream_with_sub(
     magnet: String,
@@ -602,13 +1083,42 @@ async fn start_stream_with_sub(
     resume_seconds: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
-    start_stream_inner(magnet, sub_path.map(PathBuf::from), resume_seconds, &state).await
+    start_stream_inner(
+        magnet,
+        sub_path.map(PathBuf::from),
+        resume_seconds,
+        PlayerMode::Vlc,
+        &state,
+    )
+    .await
+}
+
+/// Arranca el stream en modo player HTML: no spawnea VLC, solo librqbit +
+/// el servidor HTTP local. La URL devuelta se usa como `<video src>`
+/// (con `/play.mp4` como path para pasar por ffmpeg / transmux). Los
+/// subtítulos los descarga el frontend por separado vía endpoints
+/// dedicados.
+#[tauri::command]
+async fn start_stream_html(
+    magnet: String,
+    state: State<'_, AppState>,
+) -> Result<StreamInfo, String> {
+    start_stream_inner(magnet, None, None, PlayerMode::Html, &state).await
+}
+
+#[derive(Copy, Clone)]
+enum PlayerMode {
+    /// Spawnea VLC como proceso externo con `--sub-file` y `--start-time`.
+    Vlc,
+    /// Solo librqbit + HTTP server. El player vive en la webview.
+    Html,
 }
 
 async fn start_stream_inner(
     magnet: String,
     sub_path: Option<PathBuf>,
     resume_seconds: Option<u32>,
+    mode: PlayerMode,
     state: &State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
     let handle = stream::start(magnet).await.map_err(|e| e.to_string())?;
@@ -624,10 +1134,14 @@ async fn start_stream_inner(
         file_name: handle.file_name.clone(),
     };
 
-    // Guardamos el PlayerHandle entero: `alive` para reflejar el
-    // estado en `stream_stats` y `kill_token` para que `stop_stream`
-    // cierre VLC activamente cuando el user pulse "Detener".
-    let player = stream::open_in_vlc(&handle.url, sub_path.as_deref(), resume_seconds);
+    let player = match mode {
+        PlayerMode::Vlc => Some(stream::open_in_vlc(
+            &handle.url,
+            sub_path.as_deref(),
+            resume_seconds,
+        )),
+        PlayerMode::Html => None,
+    };
 
     state
         .streams
@@ -652,7 +1166,15 @@ async fn stream_stats(id: u64, state: State<'_, AppState>) -> Result<StreamStats
     let active = streams
         .get(&id)
         .ok_or_else(|| format!("stream {id} no encontrado"))?;
-    let alive = active.player.alive.load(Ordering::Relaxed);
+    // En modo VLC (player = Some) `alive` refleja si el proceso VLC
+    // sigue vivo. En modo HTML (player = None) el stream vive hasta
+    // que el frontend llame explícitamente a `stop_stream`, así que
+    // `alive` es `true` mientras el slot exista.
+    let alive = active
+        .player
+        .as_ref()
+        .map(|p| p.alive.load(Ordering::Relaxed))
+        .unwrap_or(true);
     let StreamStats {
         progress_bytes,
         total_bytes,
@@ -662,7 +1184,8 @@ async fn stream_stats(id: u64, state: State<'_, AppState>) -> Result<StreamStats
 
     // Si VLC murió, limpiamos el slot: así el frontend recibe un solo
     // stats con `alive=false` y después deja de pollear. El Drop del
-    // handle apaga librqbit + libera el tempdir.
+    // handle apaga librqbit + libera el tempdir. En modo HTML no
+    // aplica: solo `stop_stream` explícito puede quitar el slot.
     if !alive {
         streams.remove(&id);
     }
@@ -682,21 +1205,34 @@ async fn stop_stream(id: u64, state: State<'_, AppState>) -> Result<(), String> 
     // VLC vivo (macOS lo lanza vía LaunchServices, no como hijo
     // directo) y el user tenía que ir a cerrarlo a mano. `kill()`
     // dispara el `CancellationToken` que la tarea de espera del
-    // PlayerHandle usa para invocar el quit nativo por SO.
+    // PlayerHandle usa para invocar el quit nativo por SO. En modo
+    // HTML no hay player externo → basta con quitar el slot; el Drop
+    // del `StreamHandle` cierra la sesión BitTorrent.
     if let Some(active) = state.streams.lock().await.remove(&id) {
-        active.player.kill();
+        if let Some(player) = active.player.as_ref() {
+            player.kill();
+        }
     }
     Ok(())
 }
 
 /// Devuelve la posición de resume guardada para un magnet, si la caché
-/// tiene una entrada para su infohash. `fraction` en [0.0, 1.0] es la
-/// relación `max_seek_bytes / file_len` alcanzada en la sesión previa.
-/// El frontend la convierte a segundos con el runtime de TMDB y decide
-/// si mostrar el prompt de "Reanudar".
+/// tiene una entrada para su infohash. Puede venir en dos formas:
+///
+///   * `seconds` + `duration_seconds` — reportado por el player HTML
+///     con `report_position`. Preferido: viene del `<video>.currentTime`
+///     (exacto) y funciona sin runtime de TMDB → habilita resume en
+///     modo direct y en búsquedas directas.
+///   * `fraction` — byte-based, escrito por el Drop de `StreamHandle`
+///     (fallback VLC y compatibilidad con caché legacy).
+///
+/// El frontend prefiere `seconds` cuando existe; si solo hay
+/// `fraction`, multiplica por `runtime_minutes` de TMDB.
 #[derive(Serialize)]
 struct ResumeDto {
     fraction: f32,
+    seconds: Option<f64>,
+    duration_seconds: Option<f64>,
     updated_at: u64,
 }
 
@@ -707,8 +1243,47 @@ async fn get_resume(magnet: String) -> Result<Option<ResumeDto>, String> {
     };
     Ok(stream::load_resume(&hash).map(|r| ResumeDto {
         fraction: r.fraction,
+        seconds: r.seconds,
+        duration_seconds: r.duration_seconds,
         updated_at: r.updated_at,
     }))
+}
+
+/// El player HTML llama a este comando cada ~15s (y en el cleanup, y
+/// al pulsar Volver) con la posición absoluta del `<video>` y la
+/// duración detectada por ffprobe. Backend persiste ambos valores en
+/// `resume.json` (merge-style, sin pisar `fraction`); si la posición
+/// supera el 95% del runtime, borra el resume (peli terminada).
+///
+/// Errores no bloquean al player: si el `stream_id` ya no está vivo
+/// (stopStream previo, race con navigate away), devolvemos Ok sin más.
+/// Si el magnet no tiene infohash reconocible (caché en tempdir, sin
+/// persistencia), tampoco es error — simplemente no hay dónde escribir.
+#[tauri::command]
+async fn report_position(
+    stream_id: u64,
+    seconds: f64,
+    duration_seconds: f64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Sanea entradas no finitas: HLS puede reportar `duration = Infinity`
+    // en transiciones raras, y un `NaN` cualquiera reventaría el
+    // `serde_json::to_string` dentro de `save_position` (JSON no
+    // representa NaN/Infinity), acabando con una escritura silenciosa
+    // fallida y el resume perdido. Descartamos el update en su lugar.
+    if !seconds.is_finite() || !duration_seconds.is_finite() {
+        return Ok(());
+    }
+    let infohash = {
+        let streams = state.streams.lock().await;
+        streams
+            .get(&stream_id)
+            .and_then(|s| s.handle.infohash.clone())
+    };
+    if let Some(hash) = infohash {
+        stream::save_position(&hash, seconds, duration_seconds);
+    }
+    Ok(())
 }
 
 // ---------- Subtítulos ----------
@@ -718,17 +1293,137 @@ async fn subtitles_available() -> Result<bool, String> {
     Ok(subtitles::is_available())
 }
 
+/// Reporta si ffmpeg + ffprobe están en PATH. El frontend lo usa al
+/// arrancar para decidir si el toggle "Reproductor HTML" en Preferences
+/// puede activarse y para mostrar un aviso si el user tiene la
+/// preferencia en `Html` pero no tiene ffmpeg instalado — en ese caso
+/// cae a VLC automáticamente y le enseña las instrucciones de install.
+#[tauri::command]
+async fn ffmpeg_available() -> Result<bool, String> {
+    Ok(crate::ffmpeg::is_available())
+}
+
 #[tauri::command]
 async fn search_subtitles(
+    stream_id: Option<u64>,
     imdb_id: Option<String>,
     query: Option<String>,
     languages: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<Subtitle>, String> {
-    let langs = languages.unwrap_or_else(|| subtitles::DEFAULT_LANGUAGES.to_string());
-    subtitles::search(&state.http, imdb_id.as_deref(), query.as_deref(), &langs)
-        .await
-        .map_err(|e| e.to_string())
+    let langs = languages.unwrap_or_default();
+
+    // Intento #1: hash del fichero de vídeo. Es el criterio más preciso
+    // — OpenSubtitles indexa subs por hash de fichero y devuelve solo
+    // los que fueron sync-verified con ESE release exacto (no importa
+    // si el imdb_id que envió el frontend está mal por mismatch en el
+    // catálogo TMDB: el hash desambigua al contenido real).
+    //
+    // Si el fichero no está descargado lo suficiente (< 128 KB por
+    // ambos extremos), `compute_moviehash` devuelve None y caemos al
+    // path clásico.
+    let moviehash = if let Some(id) = stream_id {
+        // Extraemos las 3 piezas necesarias para el hash mientras
+        // tenemos el lock del map de streams; luego lo soltamos y
+        // computamos el hash sin bloquear el map (compute_moviehash
+        // puede tardar segundos leyendo del torrent).
+        let extracted = {
+            let streams = state.streams.lock().await;
+            streams.get(&id).map(|active| {
+                (
+                    active.handle.torrent_arc(),
+                    active.handle.file_id,
+                    active.handle.file_len,
+                )
+            })
+        };
+        if let Some((mt, fid, flen)) = extracted {
+            stream::compute_moviehash(mt, fid, flen).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    eprintln!(
+        "[subs] search_subtitles stream_id={:?} moviehash={:?} imdb_id={:?} query={:?} langs={:?}",
+        stream_id, moviehash, imdb_id, query, langs
+    );
+
+    // Estrategia Stremio-like: ejecutar EN PARALELO las dos búsquedas
+    // (hash → sync perfecta; imdb/query → catálogo completo) y
+    // fusionarlas. El corto-circuito anterior (return al primer hit
+    // por hash) ocultaba el catálogo entero: una peli con hash
+    // indexado se quedaba en 1-3 subs cuando Stremio mostraba 200+.
+    //
+    // La REST v1 de OpenSubtitles combina filtros con AND, así que
+    // NO podemos mandar hash + imdb en la misma request (dejaría
+    // fuera todos los subs cuyo release no matchee el fichero
+    // exacto). Por eso son dos requests separadas + merge en cliente.
+    //
+    // Orden final: hash-matches primero (perfect sync arriba), luego
+    // el resto ordenado como venga del `search` (trusted → downloads
+    // por idioma). Dedup por `file_id` conservando la primera
+    // aparición → si un sub aparece en ambos, se queda como
+    // hash-match.
+    let http_ref = &state.http;
+    let hash_fut = async {
+        if let Some(hash) = moviehash.as_deref() {
+            match subtitles::search(http_ref, Some(hash), None, None, &langs).await {
+                Ok(mut subs) => {
+                    for s in &mut subs {
+                        s.hash_match = true;
+                    }
+                    Ok(subs)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(Vec::new())
+        }
+    };
+    let catalog_fut = async {
+        if imdb_id.is_some() || query.is_some() {
+            subtitles::search(http_ref, None, imdb_id.as_deref(), query.as_deref(), &langs).await
+        } else {
+            Ok(Vec::new())
+        }
+    };
+    let (hash_res, catalog_res) = tokio::join!(hash_fut, catalog_fut);
+
+    let hash_subs = match hash_res {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[subs] hash search ERROR: {e}");
+            Vec::new()
+        }
+    };
+    let catalog_subs = match catalog_res {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[subs] catalog search ERROR: {e}");
+            Vec::new()
+        }
+    };
+
+    // Dedup estable por file_id: primero los hash-matches (mantienen
+    // su flag), luego los del catálogo. Un HashSet basta porque
+    // file_id es único en OpenSubtitles.
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut merged: Vec<Subtitle> = Vec::with_capacity(hash_subs.len() + catalog_subs.len());
+    for s in hash_subs.into_iter().chain(catalog_subs.into_iter()) {
+        if seen.insert(s.file_id) {
+            merged.push(s);
+        }
+    }
+
+    eprintln!(
+        "[subs] merged → {} results ({} hash-matched primeros)",
+        merged.len(),
+        merged.iter().filter(|s| s.hash_match).count()
+    );
+    Ok(merged)
 }
 
 /// Descarga un subtítulo y devuelve la ruta local. El frontend le pasa
@@ -741,6 +1436,18 @@ async fn download_subtitle(sub: Subtitle, state: State<'_, AppState>) -> Result<
         .await
         .map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
+}
+
+/// Lee un `.srt` local (path devuelto por `download_subtitle`) y lo
+/// convierte a WebVTT en memoria. El player HTML lo consume vía
+/// `URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }))` para
+/// alimentar un `<track>` sin escribir un fichero temporal más.
+#[tauri::command]
+async fn subtitle_to_vtt(path: String) -> Result<String, String> {
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("No se pudo leer {path}: {e}"))?;
+    Ok(subtitles::srt_to_vtt(&bytes))
 }
 
 // Nota histórica: antes existía un mapa `pending_subs` que asociaba un
@@ -774,6 +1481,24 @@ fn cache_files() -> Vec<(&'static str, &'static str, &'static str)> {
         ("watchlist", "Watchlist Letterboxd", "watchlist.json"),
         ("tmdb_recs", "Recomendaciones TMDB", "tmdb_recs_cache.json"),
         ("search", "Búsquedas TMDB + torrents", SEARCH_CACHE_FILE),
+        (
+            "torrent_search",
+            "Resultados de torrents (30 min / 5 min vacío)",
+            TORRENT_CACHE_FILE,
+        ),
+        // Caches anti-caída de TMDB (extendidos en Opción 1+2):
+        // sirven metadatos ya vistos cuando TMDB tiene un incidente.
+        (
+            "tmdb_search",
+            "Búsquedas TMDB (títulos)",
+            "tmdb_search_cache.json",
+        ),
+        ("tmdb_view", "Detalles TMDB (modal)", "tmdb_view_cache.json"),
+        (
+            "tmdb_details",
+            "Detalles TMDB (torrents)",
+            "tmdb_details_cache.json",
+        ),
     ]
 }
 
@@ -872,6 +1597,9 @@ async fn clear_cache(kind: String, state: State<'_, AppState>) -> Result<(), Str
     if kind == "all" || kind == "search" {
         state.search_cache.lock().await.clear();
     }
+    if kind == "all" || kind == "torrent_search" {
+        state.torrent_cache.lock().await.clear();
+    }
     Ok(())
 }
 
@@ -894,6 +1622,8 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
         streams: Arc::new(Mutex::new(HashMap::new())),
         next_stream_id: Arc::new(Mutex::new(0)),
         search_cache: Arc::new(Mutex::new(load_search_cache())),
+        torrent_cache: Arc::new(Mutex::new(load_torrent_cache())),
+        recs_pool: Arc::new(Mutex::new(None)),
     };
 
     // Prune de la caché de streams al arrancar, en un hilo aparte para
@@ -905,6 +1635,19 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
     std::thread::spawn(|| {
         let prefs = preferences::load();
         let _ = stream::prune(prefs.stream_cache_ttl_days);
+        // Purga también los `.srt` descargados por download_subtitle:
+        // se acumulan en `<TMPDIR>/videodrome-subs/` y macOS no
+        // garantiza limpieza del TMPDIR de usuario. Los subs que se
+        // usan actualmente están cargados en memoria por el player
+        // (blob VTT), así que borrar el dir es seguro entre sesiones.
+        let subs_dir = std::env::temp_dir().join("videodrome-subs");
+        let _ = std::fs::remove_dir_all(&subs_dir);
+        // Y los tempdirs huérfanos de sesiones HLS/stream previas
+        // (Fase F del audit Windows: en NTFS el `TempDir::drop` no
+        // puede unlinkear ficheros con handles abiertos, así que
+        // basura queda entre ejecuciones). El barrido es seguro
+        // porque solo mira dirs con nuestros prefijos.
+        let _ = stream::prune_orphan_tempdirs();
     });
 
     tauri::Builder::default()
@@ -936,7 +1679,7 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             logout,
             login,
             get_username,
-            get_recommendations,
+            get_recommendations_page,
             dismiss_recommendation,
             undismiss_recommendation,
             list_dismissed,
@@ -947,12 +1690,16 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             open_magnet,
             start_stream,
             start_stream_with_sub,
+            start_stream_html,
+            ffmpeg_available,
             stream_stats,
             stop_stream,
             get_resume,
+            report_position,
             subtitles_available,
             search_subtitles,
             download_subtitle,
+            subtitle_to_vtt,
             cache_info,
             clear_cache,
             get_preferences,

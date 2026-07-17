@@ -3,9 +3,15 @@
 # Uso (PowerShell normal, NO admin):
 #   irm https://ser356.github.io/videodrome/install.ps1 | iex
 #
-# Instala Scoop (si falta), añade los buckets extras (VLC) + ser356
-# (videodrome) e instala el paquete. El binario ya viene compilado —
-# no hace falta Rust ni node en tu máquina. ~30 segundos.
+# Instala Scoop (si falta), añade el bucket ser356 (videodrome) e
+# instala el paquete. ffmpeg viene del bucket `main` por defecto (no
+# hace falta añadirlo). El binario ya viene compilado — no hace falta
+# Rust ni node en tu máquina. ~30 segundos.
+#
+# NOTA: VLC ya no es dependencia obligatoria (el player embebido HLS
+# lo reemplaza). Si prefieres el fallback externo:
+#   scoop bucket add extras
+#   scoop install extras/vlc
 
 $ErrorActionPreference = 'Stop'
 
@@ -55,7 +61,6 @@ function Ensure-Bucket {
     }
 }
 
-Ensure-Bucket -Name 'extras'
 Ensure-Bucket -Name 'ser356' -Url 'https://github.com/ser356/scoop-bucket'
 
 Write-Host "==> Instalando videodrome (binario prebuilt, ~30s)..." -ForegroundColor Cyan

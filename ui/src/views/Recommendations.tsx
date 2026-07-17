@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { BackButton } from '../components/BackButton'
 import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
-import { FiltersDropdown } from '../components/FiltersDropdown'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { MovieDetailModal } from '../components/MovieDetailModal'
 import { SearchBox } from '../components/SearchBox'
@@ -10,8 +9,9 @@ import { Toast } from '../components/Toast'
 import { TopNav } from '../components/TopNav'
 import {
   dismissRecommendation,
+  getMovieView,
   getPreferences,
-  getRecommendations,
+  getRecommendationsPage,
   isTauri,
   tmdbPoster,
   type Recommendation,
@@ -19,101 +19,137 @@ import {
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 
 /**
- * Vista `View::Recs` de la TUI, adaptada al look "cabina de proyección".
+ * Vista `View::Recs` de la TUI adaptada al look "cabina de proyección".
  *
- * - Grid uniforme de posters. Bajo cada card: solo título + año.
- *   Nada de rating dot verde ni contadores decorativos.
- * - Filtros como una query mono editable ("rating ≥ 4.0 · top 20"),
- *   reforzando el vocabulario CLI. Hotkeys +/- y [/] siguen operando.
- * - Título de vista "Cartelera" (voz de curator, no consumer-generic).
+ * Antes había un dropdown de filtros (rating mínimo + top N) que el user
+ * ajustaba y pulsaba R para recargar. Ahora es scroll infinito: el
+ * backend computa un pool grande (~200 items) la primera vez y sirve
+ * páginas de 24 sobre él; al llegar al final de la lista un
+ * `IntersectionObserver` dispara la siguiente. Sin ceiling artificial,
+ * sin cognitive load — el "top" lo define el propio scroll.
+ *
+ * `min_rating` sigue existiendo pero como preferencia de sesión
+ * (Ajustes → Rating mínimo por defecto). No tiene sentido exponerlo en
+ * la vista si cambiarlo invalida todo el pool: es una decisión de
+ * calidad de recomendaciones, no un dial de curación.
  */
 export function Recommendations() {
   const nav = useNavigate()
-  const [count, setCount] = useState(20)
-  const [minRating, setMinRating] = useState(4.0)
+  const [minRating, setMinRating] = useState<number | null>(null)
   const [items, setItems] = useState<Recommendation[] | null>(null)
+  const [hasMore, setHasMore] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [stale, setStale] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [sel, setSel] = useState(0)
   const [detail, setDetail] = useState<Recommendation | null>(null)
-  // ID temporalmente marcado con la animación de fade-out mientras el
-  // backend refresca la lista. Solo hay uno a la vez (el user hace
-  // dismiss sobre una card).
   const [dismissingId, setDismissingId] = useState<number | null>(null)
-  // Menú contextual (click derecho) sobre una card.
   const [menu, setMenu] = useState<{
     x: number
     y: number
     rec: Recommendation
   } | null>(null)
-  // Toast efímero para confirmar el "no sugerir" con opción de
-  // restaurar desde Ajustes. Sin este feedback el user queda con la
-  // duda de si el descarte se guardó de verdad.
   const [flashMsg, setFlashMsg] = useState<string | null>(null)
 
-  const fetchRecs = useCallback(() => {
-    if (!isTauri()) {
-      setError('Esta vista requiere la app de escritorio (Tauri).')
-      return
-    }
-    setLoading(true)
-    setError(null)
-    setStale(false)
-    getRecommendations(count, minRating)
-      .then((list) => {
-        setItems(list)
-        setSel(0)
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false))
-  }, [count, minRating])
+  /** Tamaño de página del scroll infinito. 12 = 2 filas de 6 en
+   * desktop; el backend LB-enriquece exactamente estos items en la
+   * primera carga (~200-500ms con TMDB caché caliente). Batches
+   * siguientes son también de 12 según scroll. */
+  const PAGE_SIZE = 12
 
+  const fetchPage = useCallback(
+    async (offset: number, rating: number, force = false) => {
+      const isFirst = offset === 0
+      if (isFirst) {
+        setLoading(true)
+        setError(null)
+      } else {
+        setLoadingMore(true)
+      }
+      try {
+        const page = await getRecommendationsPage(offset, PAGE_SIZE, rating, force)
+        setItems((prev) => {
+          if (isFirst || prev === null) return page.items
+          // Dedup: si el user descartó pelis mientras cargábamos, el
+          // backend puede devolver items que ya no están en `prev`;
+          // los concatenamos sin repetir.
+          const seen = new Set(prev.map((r) => r.movie.id))
+          const merged = prev.slice()
+          for (const r of page.items) {
+            if (!seen.has(r.movie.id)) merged.push(r)
+          }
+          return merged
+        })
+        setHasMore(page.has_more)
+        if (isFirst) setSel(0)
+      } catch (e) {
+        setError(String(e))
+      } finally {
+        setLoading(false)
+        setLoadingMore(false)
+      }
+    },
+    [],
+  )
+
+  // Boot: leer minRating de Preferences y disparar primera página.
   useEffect(() => {
-    // Al montar, leemos las preferencias guardadas y disparamos la
-    // primera búsqueda con esos valores. Si el user no ha tocado nunca
-    // ajustes, `getPreferences` devuelve los defaults sensatos (4.0 /
-    // 20). No pasamos por `fetchRecs` porque su closure aún vería los
-    // valores hardcoded del `useState` antes de que React aplique los
-    // setters — llamamos directo a `getRecommendations` con los valores
-    // frescos.
     if (!isTauri()) {
       setError('Esta vista requiere la app de escritorio (Tauri).')
       return
     }
     let cancelled = false
     ;(async () => {
-      let c = count
-      let r = minRating
+      let r = 4.0
       try {
         const p = await getPreferences()
-        c = p.default_count
         r = p.default_min_rating
       } catch {
-        // preferencias corruptas o backend down: seguimos con defaults
+        // preferencias corruptas / backend down: seguimos con default.
       }
       if (cancelled) return
-      setCount(c)
       setMinRating(r)
-      setLoading(true)
-      setError(null)
-      setStale(false)
-      try {
-        const list = await getRecommendations(c, r)
-        if (cancelled) return
-        setItems(list)
-        setSel(0)
-      } catch (e) {
-        if (!cancelled) setError(String(e))
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
+      await fetchPage(0, r, false)
     })()
     return () => {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const refresh = () => {
+    if (minRating == null) return
+    void fetchPage(0, minRating, true)
+  }
+
+  // IntersectionObserver sobre un sentinel al final del grid. Cuando
+  // el sentinel entra en viewport y todavía queda pool, disparamos la
+  // siguiente página. El `rootMargin` de 400px pre-carga un poco antes
+  // de que el user llegue al final visualmente — evita el "salto" a
+  // spinner en scroll rápido.
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el || minRating == null) return
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (
+            entry.isIntersecting &&
+            hasMore &&
+            !loading &&
+            !loadingMore &&
+            items !== null
+          ) {
+            void fetchPage(items.length, minRating, false)
+          }
+        }
+      },
+      { rootMargin: '400px' },
+    )
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [hasMore, loading, loadingMore, items, minRating, fetchPage])
 
   const openTorrents = (rec: Recommendation) => {
     const y = rec.movie.release_date?.slice(0, 4)
@@ -124,35 +160,45 @@ export function Recommendations() {
     )
   }
 
+  // Hover-preload de detalles: al pasar el ratón sobre una card
+  // disparamos `getMovieView` en background. El backend cachea la
+  // respuesta 7d en disco, así que cuando el user haga click el modal
+  // se abre con la sinopsis lista sin espera. Set anti-duplicados
+  // por id — evita machacar TMDB si el user pasea el cursor por el
+  // grid varias veces.
+  const preloadedRef = useRef<Set<number>>(new Set())
+  const preloadDetail = useCallback((tmdbId: number) => {
+    if (preloadedRef.current.has(tmdbId)) return
+    preloadedRef.current.add(tmdbId)
+    void getMovieView(tmdbId).catch(() => {
+      // Fallo → permitimos reintentar en el próximo hover.
+      preloadedRef.current.delete(tmdbId)
+    })
+  }, [])
+
   /**
-   * "No sugerir" reactivo con dos fases desacopladas para que la card
-   * desaparezca YA aunque el backend tarde varios segundos en volver
-   * (la recomputación pega a TMDB + Letterboxd si la caché no ayuda):
+   * "No sugerir" reactivo con fade-out + eliminación local.
    *
-   *  1. Animación de fade-out (220 ms) → tras ella, quitamos la card
-   *     localmente. Aquí el user ya ve el efecto inmediato.
-   *  2. En paralelo, backend recalcula la lista con el reemplazo al
-   *     final. Cuando responde, sustituimos `items` completo → el
-   *     nuevo poster entra con `animate-card-in` (key nueva).
+   * Antes el backend re-computaba la lista entera para meter un
+   * reemplazo al final; con el pool cacheado y scroll infinito ya no
+   * hace falta — el user simplemente ve una peli menos y las
+   * siguientes páginas ya llegarán filtradas.
    */
   const dismissCurrent = async (rec: Recommendation) => {
     if (dismissingId !== null) return
     setDismissingId(rec.movie.id)
 
-    // Fire-and-forget: el backend refresca en background. No bloquea
-    // la eliminación visual.
-    const refresh = dismissRecommendation(
+    // Fire-and-forget al backend. Si falla, avisamos pero no
+    // deshacemos el fade — el usuario ya vio el efecto.
+    void dismissRecommendation(
       rec.movie.id,
       rec.movie.title,
       rec.movie.poster_path,
-      count,
-      minRating,
     ).catch((e) => {
       setFlashMsg(`Error al descartar: ${String(e)}`)
-      return null
     })
 
-    // Fase 1: espera solo la animación, luego elimina localmente.
+    // Fade-out (220ms) → eliminar localmente.
     await new Promise((r) => setTimeout(r, 220))
     setDismissingId(null)
     setItems((prev) =>
@@ -162,13 +208,6 @@ export function Recommendations() {
     setFlashMsg(
       `Descartada: ${rec.movie.title}. Restaurar desde Ajustes.`,
     )
-
-    // Fase 2: cuando el backend termine, sustituimos la lista completa
-    // para meter el reemplazo backfill al final. Si no hay respuesta
-    // (error), nos quedamos con la lista de `count - 1` — el user
-    // puede pulsar R para recargar.
-    const freshList = await refresh
-    if (freshList) setItems(freshList)
   }
 
   // Auto-hide del toast de dismiss.
@@ -184,14 +223,14 @@ export function Recommendations() {
     setSel((i) => (i + delta + n) % n)
   }
 
-  const bumpRating = (d: number) => {
-    setMinRating((r) => Math.min(5, Math.max(0.5, +(r + d).toFixed(1))))
-    setStale(true)
-  }
-  const bumpCount = (d: number) => {
-    setCount((c) => Math.max(5, c + d))
-    setStale(true)
-  }
+  // Preload detail para el item seleccionado con teclado (j/k, ↑/↓).
+  // Debounce 150ms para no saturar TMDB con scroll rápido.
+  useEffect(() => {
+    if (!items || items[sel] == null) return
+    const id = items[sel].movie.id
+    const timer = window.setTimeout(() => preloadDetail(id), 150)
+    return () => window.clearTimeout(timer)
+  }, [sel, items, preloadDetail])
 
   const hotkeys: Hotkey[] = [
     { key: 'j', hint: '', run: () => move(1) },
@@ -210,14 +249,10 @@ export function Recommendations() {
       hint: 'Torrents',
       run: () => items && items[sel] && openTorrents(items[sel]),
     },
-    { key: 'r', hint: 'Recargar', run: () => fetchRecs() },
-    { key: '+', hint: '', run: () => bumpRating(0.5) },
-    { key: '-', hint: 'Rating', run: () => bumpRating(-0.5) },
-    { key: ']', hint: '', run: () => bumpCount(5) },
-    { key: '[', hint: 'Top', run: () => bumpCount(-5) },
+    { key: 'r', hint: 'Recargar', run: refresh },
     { key: 'Escape', hint: '', run: () => nav('/') },
   ]
-  useHotkeys(hotkeys, [items, sel, count, minRating, fetchRecs], {
+  useHotkeys(hotkeys, [items, sel, minRating], {
     enabled: detail === null && menu === null,
   })
 
@@ -226,16 +261,6 @@ export function Recommendations() {
       <TopNav>
         <BackButton onClick={() => nav('/')} />
         <SearchBox />
-        <FiltersDropdown
-          minRating={minRating}
-          count={count}
-          dirty={stale}
-          onChange={(nr, nc) => {
-            setMinRating(nr)
-            setCount(nc)
-            setStale(true)
-          }}
-        />
       </TopNav>
 
       <main className="mx-auto w-full max-w-[1400px] flex-1 px-8 py-8">
@@ -259,32 +284,50 @@ export function Recommendations() {
         )}
 
         {items && items.length > 0 && (
-          <ul className="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-            {items.map((rec, i) => (
-              <MovieCard
-                key={rec.movie.id}
-                rec={rec}
-                active={i === sel}
-                dismissing={rec.movie.id === dismissingId}
-                onClick={() => setDetail(rec)}
-                onMouseEnter={() => setSel(i)}
-                onContextMenu={(x, y) => {
-                  setSel(i)
-                  setMenu({ x, y, rec })
-                }}
-              />
-            ))}
-          </ul>
+          <>
+            <ul className="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+              {items.map((rec, i) => (
+                <MovieCard
+                  key={rec.movie.id}
+                  rec={rec}
+                  active={i === sel}
+                  dismissing={rec.movie.id === dismissingId}
+                  onClick={() => setDetail(rec)}
+                  onMouseEnter={() => {
+                    setSel(i)
+                    preloadDetail(rec.movie.id)
+                  }}
+                  onContextMenu={(x, y) => {
+                    setSel(i)
+                    setMenu({ x, y, rec })
+                  }}
+                />
+              ))}
+            </ul>
+
+            {/* Sentinel para el IntersectionObserver + spinner de la
+                siguiente página. Solo se pinta si aún queda pool o si
+                estamos cargando; cuando `has_more = false` desaparece
+                (evita infinite triggering). */}
+            {(hasMore || loadingMore) && (
+              <div
+                ref={sentinelRef}
+                className="flex h-24 items-center justify-center"
+              >
+                {loadingMore && (
+                  <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                )}
+              </div>
+            )}
+
+            {!hasMore && !loadingMore && (
+              <p className="mt-10 text-center text-[12px] text-dim">
+                Fin de la cartelera. {items.length} recomendaciones.
+              </p>
+            )}
+          </>
         )}
       </main>
-
-      <Toast visible={stale && !loading && flashMsg === null}>
-        <span className="text-muted">Hay cambios pendientes.</span>
-        <span>
-          Pulsa <span className="font-semibold text-ink">R</span> para
-          recargar.
-        </span>
-      </Toast>
 
       <Toast visible={flashMsg !== null}>
         <span className="text-body">{flashMsg}</span>
