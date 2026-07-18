@@ -1,9 +1,9 @@
-//! Provider EZTV (eztv.re). API JSON pública, sin auth. Solo series.
+//! Provider EZTV. API JSON pública, sin auth. Solo series.
 //! Docs: <https://eztv.re/api/>
 //!
 //! Endpoint:
 //!
-//!   GET https://eztv.re/api/get-torrents?imdb_id=<digits>&limit=100&page=N
+//!   GET https://<host>/api/get-torrents?imdb_id=<digits>&limit=100&page=N
 //!
 //! Devuelve JSON con `torrents[] { hash, filename, title, season, episode,
 //! magnet_url, seeds, peers, size_bytes, ... }`. Todos los campos
@@ -17,10 +17,47 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 
 use super::{build_magnet, MovieQuery, Torrent, TorrentProvider};
 
-const BASE: &str = "https://eztv.re/api/get-torrents";
+/// Lista de hosts EZTV a probar en orden. Todos exponen la misma API
+/// JSON — mismo path, mismos parámetros, mismo schema — así que el
+/// primer host que responda 200 con `torrents[]` gana. Motivo: el
+/// dominio canónico `eztv.re` está BLOQUEADO POR DNS en muchos ISP
+/// europeos (Movistar/Vodafone/Orange en ES, TIM en IT), devolviendo
+/// "Could not resolve host" que hunde el provider entero al `ok=false`
+/// del ProviderStatus.
+///
+/// Orden:
+///   1. `eztvx.to` — dominio "oficial" del catálogo desde el
+///      re-launch de 2024. Estable, sin filtros DNS habituales.
+///   2. `eztv.wf` — mirror comunitario con el mismo backend.
+///      Fallback si `.to` tuviera problemas puntuales.
+///   3. `eztv.re` — canónico histórico. Bloqueado en muchos ISP
+///      europeos pero lo dejamos por si el user está fuera de una
+///      jurisdicción con censura.
+///
+/// NOTA: NO añadas `eztv.ag`, `eztv.it` u otros dominios encontrados
+/// por búsqueda — son squatters con contenido distinto (o vacío)
+/// desde 2023. Antes de meter un mirror nuevo, verifica con curl
+/// que `/api/get-torrents?imdb_id=5491994&limit=1` devuelve JSON con
+/// `torrents_count > 0`.
+const EZTV_HOSTS: &[&str] = &["https://eztvx.to", "https://eztv.wf", "https://eztv.re"];
+
+/// Timeout corto POR HOST — no queremos gastar los 8s de budget del
+/// provider (definido en `super::PROVIDER_TIMEOUT`) en un solo mirror
+/// muerto. Con 3 hosts × 2.5s salen ~7.5s peor caso, encajando justo
+/// con el timeout global antes de que `run_provider` corte.
+const EZTV_HOST_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// User-Agent tipo navegador. Los mirrors de EZTV pueden sentarse
+/// tras Cloudflare/DDoS-Guard y devolver 403/503 a UAs no-browser
+/// (incluido `videodrome/x.y.z`). Este UA de Firefox reciente pasa
+/// el challenge estándar y evita el falso positivo de "HTTP status
+/// server error" cuando la API está viva.
+const EZTV_BROWSER_UA: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0";
 
 pub struct Eztv;
 
@@ -107,18 +144,8 @@ impl TorrentProvider for Eztv {
             return Ok(Vec::new());
         }
 
-        let url = format!("{BASE}?imdb_id={imdb_num}&limit=100&page=1");
-        let resp = http
-            .get(&url)
-            .send()
-            .await
-            .context("Error de red hacia EZTV")?
-            .error_for_status()
-            .context("EZTV devolvió error HTTP")?;
-        let parsed: EztvResponse = resp
-            .json()
-            .await
-            .context("Error al parsear respuesta de EZTV")?;
+        let path = format!("/api/get-torrents?imdb_id={imdb_num}&limit=100&page=1");
+        let parsed = fetch_from_any_host(http, &path).await?;
 
         let mut out = Vec::with_capacity(parsed.torrents.len());
         for it in parsed.torrents {
@@ -172,4 +199,55 @@ impl TorrentProvider for Eztv {
 
         Ok(out)
     }
+}
+
+/// Prueba cada host de `EZTV_HOSTS` en orden hasta que uno responda
+/// 200 con JSON parseable. Errores de red / HTTP / parse en un host
+/// no propagan al caller — se registran en stderr y se sigue con el
+/// siguiente. Solo cuando TODOS fallan devolvemos el último error.
+///
+/// Timeout POR HOST vía `EZTV_HOST_TIMEOUT` para no gastar todo el
+/// budget del provider en un mirror muerto.
+async fn fetch_from_any_host(http: &reqwest::Client, path: &str) -> Result<EztvResponse> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for host in EZTV_HOSTS {
+        let url = format!("{host}{path}");
+        let fut = http
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, EZTV_BROWSER_UA)
+            .send();
+        let resp = match tokio::time::timeout(EZTV_HOST_TIMEOUT, fut).await {
+            Err(_) => {
+                last_err = Some(anyhow::anyhow!("timeout {host}"));
+                eprintln!("[eztv] timeout {host}");
+                continue;
+            }
+            Ok(Err(e)) => {
+                // DNS block / connection reset / TLS. Silencio a
+                // stderr y probamos el siguiente.
+                eprintln!("[eztv] red {host}: {e}");
+                last_err = Some(anyhow::Error::from(e));
+                continue;
+            }
+            Ok(Ok(r)) => r,
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            eprintln!("[eztv] {host} HTTP {status}");
+            last_err = Some(anyhow::anyhow!("{host} HTTP {status}"));
+            continue;
+        }
+        match resp.json::<EztvResponse>().await {
+            Ok(parsed) => return Ok(parsed),
+            Err(e) => {
+                // JSON malformado (típico: Cloudflare devuelve HTML
+                // de challenge con 200). Probar el siguiente host.
+                eprintln!("[eztv] {host} parse: {e}");
+                last_err = Some(anyhow::Error::from(e));
+                continue;
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Sin hosts EZTV disponibles")))
+        .context("Todos los mirrors de EZTV fallaron")
 }
