@@ -63,6 +63,13 @@ const SEARCH_CACHE_TTL_SECS: u64 = 24 * 3600;
 const TORRENT_CACHE_FILE: &str = "torrent_search_cache.json";
 const TORRENT_CACHE_TTL_HITS: u64 = 30 * 60;
 const TORRENT_CACHE_TTL_EMPTY: u64 = 5 * 60;
+/// TTL corto aplicado cuando ALGÚN provider falló durante la búsqueda
+/// que produjo la entrada. Los errores transitorios (DNS bloqueado
+/// puntual, mirror caído 30s, timeout ocasional) NO deberían
+/// clavarse 30 min en la vista — cachearlos poco tiempo permite
+/// que un reintento poco después vea un estado sano sin que el user
+/// tenga que ir a Settings > Limpiar caché.
+const TORRENT_CACHE_TTL_PARTIAL_FAIL: u64 = 60;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct CachedTorrentSearch {
@@ -178,10 +185,21 @@ fn torrent_cache_key_with_ep(
     }
 }
 
-/// TTL aplicable a una entrada según si tiene resultados o no.
+/// TTL aplicable a una entrada según qué contiene:
+///   * Vacío (sin ningún result) → `TTL_EMPTY` (5 min). Evita
+///     martillear providers cuando el user vuelve a una peli sin
+///     releases (estrenos futuros).
+///   * Algún provider falló (`ok=false`) → `TTL_PARTIAL_FAIL`
+///     (60s). Los errores transitorios NO deben clavarse 30 min en
+///     la UI; una nueva request poco después verá el estado sano.
+///   * Todo OK y hay results → `TTL_HITS` (30 min).
 fn torrent_cache_ttl(entry: &CachedTorrentSearch) -> u64 {
     if entry.result.results.is_empty() {
-        TORRENT_CACHE_TTL_EMPTY
+        return TORRENT_CACHE_TTL_EMPTY;
+    }
+    let any_failed = entry.result.providers.iter().any(|p| !p.ok);
+    if any_failed {
+        TORRENT_CACHE_TTL_PARTIAL_FAIL
     } else {
         TORRENT_CACHE_TTL_HITS
     }
