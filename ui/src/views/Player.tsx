@@ -1286,8 +1286,23 @@ export function Player() {
           controlsVisible ? 'opacity-100' : 'opacity-0'
         }`}
       />
+      {/* Drag region invisible SIEMPRE activa en el borde superior.
+          `titleBarStyle: Overlay + hiddenTitle: true` esconde la
+          barra del sistema, así que sin este strip la ventana no se
+          puede arrastrar en modo player (el `<video>` ocupa el
+          100%). Altura 28px = alto de los semaphore buttons en
+          macOS; queda debajo del back button (que arranca en pt-5,
+          y=20, con h-9 = ocupa hasta y=56 y captura sus clicks al
+          estar en z-index mayor por orden DOM). Persiste con
+          controles ocultos — no depende de `controlsVisible`. */}
       <div
-        className={`absolute inset-x-0 top-0 flex items-center gap-3 px-5 pt-5 transition-opacity ${
+        data-tauri-drag-region
+        className="absolute inset-x-0 top-0 z-10 h-7"
+        aria-hidden="true"
+      />
+      <div
+        data-tauri-drag-region
+        className={`absolute inset-x-0 top-0 z-20 flex items-center gap-3 px-5 pt-5 transition-opacity ${
           controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         onClick={(e) => e.stopPropagation()}

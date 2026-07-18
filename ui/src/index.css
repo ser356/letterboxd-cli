@@ -60,6 +60,20 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+  /* App-shell: sin selección de texto (comportamiento tipo app nativa,
+   * no navegador). Los inputs/textareas/contenteditable siguen
+   * seleccionables por la excepción de abajo — no rompe copiar/pegar
+   * en campos de búsqueda ni edición de preferencias. También
+   * desactivamos el callout largo (long-press) en macOS/iOS. */
+  html, body, #root {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  input, textarea, [contenteditable="true"], [contenteditable=""] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
   /* Kill the browser's default monospace on <kbd>, <code>, <samp>. We
    * want the same sans family everywhere, no exceptions. */
   kbd, code, samp, pre {
