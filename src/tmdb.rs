@@ -387,7 +387,13 @@ impl<'a> TmdbClient<'a> {
     /// El orden de relevancia de TMDB se preserva; los hits de director
     /// se anexan al final; los de Cinemeta se usan solo si no hay
     /// respuesta de TMDB.
+    ///
+    /// **Legacy** (§7 audit series): la GUI usa ahora `search_multi`
+    /// para poder devolver movie + tv en el mismo request. Este
+    /// método queda como referencia + fallback API pero no está
+    /// wired en el flujo actual — de ahí el `allow(dead_code)`.
     #[cfg(feature = "gui")]
+    #[allow(dead_code)]
     pub async fn search_movies(&self, query: &str) -> Result<Vec<TmdbMovie>> {
         let q = query.trim();
         if q.is_empty() {

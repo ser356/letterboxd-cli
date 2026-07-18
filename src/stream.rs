@@ -31,6 +31,7 @@
 //! `load_resume(infohash)` y pasar `start_seconds` a `open_in_vlc` para
 //! que VLC arranque con `--start-time=<seg>`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -180,28 +181,27 @@ impl Drop for StreamHandle {
         // dejar el corrupto que reemplazarlo por un default limpio
         // que pierde toda la info previa. Solo escribimos si podemos
         // hacer un merge honesto.
+        //
+        // Multi-file (§6 audit): escribimos SOLO la entrada
+        // `files["<file_id>"]` del store — otras entradas del mismo
+        // torrent (otros episodios) sobreviven intactas.
         if let Some(hash) = self.infohash.as_deref() {
             let max = self.max_seek.load(Ordering::Relaxed);
             if self.file_len > 0 {
                 let fraction = (max as f32 / self.file_len as f32).clamp(0.0, 1.0);
                 let path = self.data_dir.join(RESUME_FILE);
-                let existing = match std::fs::read_to_string(&path) {
-                    Err(_) => Some(Resume::default()),
-                    Ok(s) => match serde_json::from_str::<Resume>(&s) {
-                        Ok(r) => Some(r),
-                        Err(e) => {
-                            eprintln!(
-                                "[resume] Drop: existing file at {} unparseable ({e}); skipping",
-                                path.display()
-                            );
-                            None
-                        }
-                    },
+                let existing = match read_store(&path) {
+                    ResumeParse::Store(s) => Some(s),
+                    ResumeParse::Absent => Some(ResumeStore::default()),
+                    ResumeParse::Corrupt => None,
                 };
-                if let Some(mut resume) = existing {
-                    resume.fraction = fraction;
-                    resume.updated_at = now_unix();
-                    if let Err(e) = write_resume_atomic(&path, &resume) {
+                if let Some(mut store) = existing {
+                    let key = self.file_id.to_string();
+                    let mut entry_r = store.files.remove(&key).unwrap_or_default();
+                    entry_r.fraction = fraction;
+                    entry_r.updated_at = now_unix();
+                    store.files.insert(key, entry_r);
+                    if let Err(e) = write_store_atomic(&path, &store) {
                         eprintln!("[resume] Drop: atomic write failed: {e}");
                     }
                 }
@@ -356,6 +356,202 @@ const EXTRA_TRACKERS: &[&str] = &[
 /// Cuánto esperamos a que el magnet resuelva metadata antes de rendirnos.
 const METADATA_TIMEOUT_SECS: u64 = 45;
 
+/// Extensiones consideradas "vídeo" a la hora de elegir fichero
+/// dentro de un torrent multi-file. El resto se ignora (samples,
+/// extras, nfo).
+const VIDEO_EXTS: &[&str] = &["mkv", "mp4", "avi", "m4v", "ts", "webm", "mov", "wmv"];
+
+/// Tamaño mínimo para considerar un fichero "de contenido" y no
+/// sample. 50 MB es el umbral que la scene usa históricamente.
+const MIN_VIDEO_SIZE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Info por-fichero devuelta al frontend por `list_files` para que
+/// pueda ofrecer selección manual (packs con numeración absoluta de
+/// anime, encoding raro, etc.). Serialized snake_case para el
+/// consumidor JS.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TorrentFileInfo {
+    pub file_id: usize,
+    pub name: String,
+    pub size: u64,
+    pub season: Option<u16>,
+    pub episode: Option<u16>,
+    /// Es candidato realista a "el vídeo del episodio" (extensión
+    /// vídeo + tamaño > sample). El frontend puede filtrar por esto.
+    pub is_video: bool,
+}
+
+/// Elige el fichero a servir dentro de la lista de un torrent.
+///
+/// * `target = None` → el vídeo más grande (comportamiento pre-audit,
+///   correcto para películas y torrents mono-fichero).
+/// * `target = Some((S, E))` → parsea cada nombre con
+///   `release_name::parse` y elige el que matchee S+E. Si varios
+///   matchean (mismo episodio en calidades duplicadas), el más
+///   grande de ellos. Si ninguno matchea, cae al mayor — así una
+///   heurística de S/E fallida no bloquea el arranque.
+///
+/// Filtra ficheros de tamaño < 50 MB para no picar samples/extras.
+pub fn select_file(
+    files: &[(usize, String, u64)],
+    target: Option<(u16, u16)>,
+) -> Option<(usize, String, u64)> {
+    // Vídeos "reales" (ext conocida + tamaño > sample). Si el filtro
+    // deja lista vacía (torrent con nombres no estándar), volvemos al
+    // set completo antes de descartar.
+    let is_video = |name: &str, size: u64| {
+        size >= MIN_VIDEO_SIZE_BYTES
+            && std::path::Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| VIDEO_EXTS.iter().any(|v| e.eq_ignore_ascii_case(v)))
+                .unwrap_or(false)
+    };
+    let candidates: Vec<&(usize, String, u64)> =
+        files.iter().filter(|(_, n, s)| is_video(n, *s)).collect();
+    let pool: Vec<&(usize, String, u64)> = if candidates.is_empty() {
+        files.iter().collect()
+    } else {
+        candidates
+    };
+
+    if let Some((qs, qe)) = target {
+        let matches: Vec<&&(usize, String, u64)> = pool
+            .iter()
+            .filter(|(_, n, _)| {
+                let p = crate::torrents::release_name::parse(n);
+                matches!((p.season, p.episode), (Some(ps), Some(pe)) if ps == qs && pe == qe)
+            })
+            .collect();
+        if let Some(best) = matches.iter().max_by_key(|(_, _, s)| *s) {
+            return Some((***best).clone());
+        }
+        // Sin match exacto: fallback al mayor del pool (mismo que sin
+        // target). Mejor un fichero incorrecto que un error duro —
+        // el user puede seleccionar manual con `list_files`.
+    }
+
+    pool.iter()
+        .max_by_key(|(_, _, s)| *s)
+        .map(|f| (**f).clone())
+}
+
+/// Lista los ficheros del torrent (resolviendo metadata) sin
+/// arrancar servidor HTTP ni empezar a bajar contenido. Útil para
+/// que la UI ofrezca selección manual en packs con nombres raros.
+///
+/// La sesión se dropea al retornar — no deja recursos vivos. Usa la
+/// misma caché persistente que `start` (mismo `<cache>/streams/<hash>/`),
+/// así que si el user llama a esto y después a `start` sobre el
+/// mismo magnet, librqbit reutiliza lo bajado.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub async fn list_files(magnet: String) -> Result<Vec<TorrentFileInfo>> {
+    let infohash = parse_infohash(&magnet);
+    let (data_dir, _tempdir_guard) = match infohash.as_deref() {
+        Some(hash) => {
+            let dir = cache_dir()?.join(hash);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("No se pudo crear {}", dir.display()))?;
+            (dir, None)
+        }
+        None => {
+            let td = tempfile::Builder::new()
+                .prefix("videodrome-listfiles-")
+                .tempdir()
+                .context("No se pudo crear directorio temporal")?;
+            (td.path().to_path_buf(), Some(td))
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    let session = Session::new_with_opts(
+        data_dir.clone(),
+        SessionOptions {
+            disable_dht_persistence: true,
+            persistence: None,
+            cancellation_token: Some(cancel.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .context("Error inicializando la sesión de librqbit")?;
+
+    let response = session
+        .add_torrent(
+            AddTorrent::from_url(&magnet),
+            Some(AddTorrentOptions {
+                overwrite: true,
+                // Modo list-only: no arranca la descarga, solo pide
+                // metadata. Al drop de `session`, no queda nada
+                // corriendo. `paused: true` sería otra opción pero
+                // reutilizamos la ruta normal para simplicidad.
+                paused: true,
+                trackers: Some(EXTRA_TRACKERS.iter().map(|s| s.to_string()).collect()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .context("Error al añadir el torrent")?;
+
+    let handle: Arc<ManagedTorrent> = match response {
+        AddTorrentResponse::Added(_, h) => h,
+        AddTorrentResponse::AlreadyManaged(_, h) => h,
+        AddTorrentResponse::ListOnly(_) => anyhow::bail!("Torrent en modo list-only"),
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(METADATA_TIMEOUT_SECS),
+        handle.wait_until_initialized(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Sin peers en {METADATA_TIMEOUT_SECS}s (magnet muerto o sin seeders reales)."
+        )
+    })?
+    .context("Error resolviendo metadata del torrent")?;
+
+    let out = handle
+        .with_metadata(|md| {
+            md.file_infos
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let name = f.relative_filename.to_string_lossy().into_owned();
+                    let parsed = crate::torrents::release_name::parse(&name);
+                    let ext = std::path::Path::new(&name)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase());
+                    let is_video = f.len >= MIN_VIDEO_SIZE_BYTES
+                        && ext
+                            .as_deref()
+                            .map(|e| VIDEO_EXTS.contains(&e))
+                            .unwrap_or(false);
+                    TorrentFileInfo {
+                        file_id: i,
+                        name,
+                        size: f.len,
+                        season: parsed.season,
+                        episode: parsed.episode,
+                        is_video,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .context("No se pudo leer metadata del torrent")?;
+
+    // Dropear la sesión explícitamente antes de retornar — el
+    // `_tempdir_guard` se dropea al retornar y no queremos que la
+    // sesión aún esté abriendo ficheros dentro cuando se borre.
+    cancel.cancel();
+    drop(session);
+
+    Ok(out)
+}
+
 /// Arranca una sesión BitTorrent para el magnet dado, sirve el fichero
 /// principal (el más grande) por HTTP en `127.0.0.1:PORT` y devuelve la
 /// URL para el reproductor.
@@ -364,7 +560,16 @@ const METADATA_TIMEOUT_SECS: u64 = 45;
 /// persistente (`<cache>/videodrome/streams/<infohash>/`) — la próxima
 /// vez que se abra esta misma peli, librqbit reutiliza los ficheros y
 /// arranca casi al instante. Sin infohash, se cae a un tempdir efímero.
+///
+/// `target`: `Some((season, episode))` para elegir dentro de un
+/// torrent multi-fichero el episodio pedido (season packs de series).
+/// `None` = comportamiento pre-audit (fichero de vídeo más grande).
 pub async fn start(magnet: String) -> Result<StreamHandle> {
+    start_with_target(magnet, None).await
+}
+
+/// Variante con selección explícita de episodio. Ver `start`.
+pub async fn start_with_target(magnet: String, target: Option<(u16, u16)>) -> Result<StreamHandle> {
     let infohash = parse_infohash(&magnet);
 
     // Directorio de datos: caché persistente si hay infohash, tempdir si
@@ -448,17 +653,22 @@ pub async fn start(magnet: String) -> Result<StreamHandle> {
     })?
     .context("Error resolviendo metadata del torrent")?;
 
-    // Selecciona el fichero más grande (heurística estándar para películas)
-    let (file_id, file_name, file_len) = handle
+    // Selección del fichero de vídeo a servir. Por defecto el más
+    // grande (heurística estándar para películas mono-fichero). Si el
+    // caller pidió un episodio concreto (season pack de serie), se
+    // busca el fichero que matchee esa S+E parseando el nombre.
+    let files: Vec<(usize, String, u64)> = handle
         .with_metadata(|md| {
             md.file_infos
                 .iter()
                 .enumerate()
-                .max_by_key(|(_, f)| f.len)
                 .map(|(i, f)| (i, f.relative_filename.to_string_lossy().into_owned(), f.len))
+                .collect::<Vec<_>>()
         })
-        .context("No se pudo leer metadata del torrent")?
-        .context("Torrent sin ficheros")?;
+        .context("No se pudo leer metadata del torrent")?;
+
+    let (file_id, file_name, file_len) =
+        select_file(&files, target).context("Torrent sin ficheros")?;
 
     // Servidor HTTP local
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -1959,6 +2169,110 @@ pub struct Resume {
     #[serde(default)]
     pub duration_seconds: Option<f64>,
     pub updated_at: u64,
+    /// Metadata de episodio si el resume es de una serie (§6 audit).
+    /// Habilita "continuar viendo" y la lógica de "siguiente episodio"
+    /// sin re-parsear el nombre del fichero cada vez.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<ResumeEpisode>,
+}
+
+/// Metadata mínima para identificar un episodio en el resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeEpisode {
+    pub season: u16,
+    pub episode: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmdb_id: Option<u64>,
+}
+
+/// Wire-format del `resume.json` en disco (§6 audit). Antes había un
+/// único `Resume` plano por infohash: dos episodios del mismo pack
+/// compartían infohash y el resume de E03 machacaba el de E02.
+/// Ahora un mapa por `file_id` (como string, por compatibilidad JSON).
+///
+/// Formato legacy (v1) se sigue leyendo — ver `load_store`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ResumeStore {
+    #[serde(default)]
+    files: HashMap<String, Resume>,
+}
+
+/// Discriminated read: primero intenta parsear la v2
+/// (`{"files":{...}}`); si el fichero es legacy (`{"fraction":...}`
+/// plano) cae al parser antiguo y lo migra a v2 in-memory bajo la
+/// clave `"0"`. La migración se persiste en el siguiente `save_*`
+/// (write-through) — no reescribimos aquí para mantener la ruta de
+/// lectura pura.
+///
+/// Racional del audit §6: adoptar la entrada vieja para file_id=0 es
+/// correcto para torrents mono-fichero (la única elección posible).
+/// Para packs multi-fichero, la primera lectura devuelve el resume
+/// bajo "0" — quizás no sea el fichero real que reproducía el user,
+/// pero un mismatch puntual es mejor que perder la posición.
+///
+/// Distingue tres estados: fichero ausente (nueva entrada válida
+/// vacía), store parseado, o corrupto (write parcial de una sesión
+/// previa que murió a mitad — NO reescribir para preservar la
+/// posibilidad de recuperación manual).
+enum ResumeParse {
+    Absent,
+    Store(ResumeStore),
+    Corrupt,
+}
+
+fn read_store(path: &Path) -> ResumeParse {
+    let data = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return ResumeParse::Absent,
+    };
+    let value: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "[resume] {} unparseable as JSON ({e}); preserving",
+                path.display()
+            );
+            return ResumeParse::Corrupt;
+        }
+    };
+    if value.get("files").is_some() {
+        match serde_json::from_value::<ResumeStore>(value) {
+            Ok(store) => ResumeParse::Store(store),
+            Err(e) => {
+                eprintln!(
+                    "[resume] {} v2 parse failed ({e}); preserving",
+                    path.display()
+                );
+                ResumeParse::Corrupt
+            }
+        }
+    } else {
+        match serde_json::from_value::<Resume>(value) {
+            Ok(legacy) => {
+                let mut files = HashMap::new();
+                files.insert("0".to_string(), legacy);
+                ResumeParse::Store(ResumeStore { files })
+            }
+            Err(e) => {
+                eprintln!(
+                    "[resume] {} legacy parse failed ({e}); preserving",
+                    path.display()
+                );
+                ResumeParse::Corrupt
+            }
+        }
+    }
+}
+
+/// Conveniencia: colapsa `Absent | Corrupt` a un store vacío. Solo
+/// para lecturas puras (`load_resume*`) donde perder acceso al
+/// corrupto es aceptable — el corrupto sigue en disco y el próximo
+/// write lo respetará.
+fn load_store(path: &Path) -> ResumeStore {
+    match read_store(path) {
+        ResumeParse::Store(s) => s,
+        _ => ResumeStore::default(),
+    }
 }
 
 /// Umbral de "peli terminada". Si el player reporta posición pasado
@@ -2038,20 +2352,53 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Lee el `resume.json` de una entrada. Devuelve `None` si no existe o
-/// está corrupto.
+/// Lee el `resume.json` de una entrada, para un `file_id` concreto.
+/// Devuelve `None` si no hay entrada para ese file_id (o el fichero
+/// no existe / está corrupto). Ver `load_store` para detalles del
+/// wire format y la migración de v1 legacy.
+///
+/// Callers que no saben el file_id (dialog de resume ANTES del start)
+/// pueden usar `load_resume_any`, que devuelve la entrada más
+/// reciente del store.
+#[allow(dead_code)]
+pub fn load_resume(infohash: &str, file_id: usize) -> Option<Resume> {
+    load_resume_in(&cache_dir().ok()?, infohash, file_id)
+}
+
+/// Devuelve la entrada de resume más reciente para el infohash, sin
+/// especificar file_id. Útil para el dialog pre-start del player
+/// (aún no se ha resuelto metadata → no hay file_id todavía). Si el
+/// caller pasa `episode`, filtra a entradas cuya `episode` matchee
+/// exactamente (S+E); útil para el flujo de serie donde el user ya
+/// sabe qué episodio va a ver.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
-pub fn load_resume(infohash: &str) -> Option<Resume> {
-    load_resume_in(&cache_dir().ok()?, infohash)
+pub fn load_resume_any(infohash: &str, episode: Option<(u16, u16)>) -> Option<Resume> {
+    load_resume_any_in(&cache_dir().ok()?, infohash, episode)
 }
 
 /// Variante testeable: opera sobre un directorio base explícito
 /// (`<base>/<infohash>/resume.json`) en vez de resolver `cache_dir()`.
-/// La versión pública lo llama con el resultado de `cache_dir()`.
-fn load_resume_in(base: &Path, infohash: &str) -> Option<Resume> {
+#[allow(dead_code)]
+fn load_resume_in(base: &Path, infohash: &str, file_id: usize) -> Option<Resume> {
     let path = base.join(infohash).join(RESUME_FILE);
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    let store = load_store(&path);
+    store.files.get(&file_id.to_string()).cloned()
+}
+
+fn load_resume_any_in(base: &Path, infohash: &str, episode: Option<(u16, u16)>) -> Option<Resume> {
+    let path = base.join(infohash).join(RESUME_FILE);
+    let store = load_store(&path);
+    let mut candidates: Vec<&Resume> = if let Some((s, e)) = episode {
+        store
+            .files
+            .values()
+            .filter(|r| matches!(&r.episode, Some(ep) if ep.season == s && ep.episode == e))
+            .collect()
+    } else {
+        store.files.values().collect()
+    };
+    candidates.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+    candidates.first().map(|r| (*r).clone())
 }
 
 /// Persiste una posición reportada por el player HTML. Merge-style:
@@ -2059,25 +2406,44 @@ fn load_resume_in(base: &Path, infohash: &str) -> Option<Resume> {
 /// anterior), preservamos ese campo y solo actualizamos `seconds` +
 /// `duration_seconds` + `updated_at`.
 ///
+/// `file_id` selecciona la entrada dentro del store multi-file
+/// (§6 audit) — dos episodios del mismo pack conviven sin pisarse.
+/// `episode` guarda metadata de S/E cuando aplica (habilita
+/// "continuar viendo" y "siguiente episodio" sin re-parsear
+/// nombres).
+///
 /// Si la posición reportada supera `COMPLETION_THRESHOLD` (95%) del
-/// runtime, borramos el resume: la peli está vista, la próxima
-/// apertura empieza limpia sin preguntar por los créditos.
+/// runtime, borra SOLO esa entrada del store — otras entradas del
+/// mismo torrent (otros episodios) sobreviven.
 ///
 /// Errores silenciosos (log a stderr): el flujo del player no debe
 /// romperse porque no podamos persistir una posición.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
-pub fn save_position(infohash: &str, seconds: f64, duration_seconds: f64) {
+pub fn save_position(
+    infohash: &str,
+    file_id: usize,
+    seconds: f64,
+    duration_seconds: f64,
+    episode: Option<ResumeEpisode>,
+) {
     let Ok(base) = cache_dir() else {
         return;
     };
-    save_position_in(&base, infohash, seconds, duration_seconds);
+    save_position_in(&base, infohash, file_id, seconds, duration_seconds, episode);
 }
 
 /// Variante testeable: idem `save_position` sobre un base dir
 /// explícito. Los tests pueden crear un tempdir y llamar aquí sin
 /// tocar la caché real del sistema (portable a macOS/Windows, donde
 /// `dirs::cache_dir` no respeta `XDG_CACHE_HOME`).
-fn save_position_in(base: &Path, infohash: &str, seconds: f64, duration_seconds: f64) {
+fn save_position_in(
+    base: &Path,
+    infohash: &str,
+    file_id: usize,
+    seconds: f64,
+    duration_seconds: f64,
+    episode: Option<ResumeEpisode>,
+) {
     let entry = base.join(infohash);
     // Si la entrada no existe (magnet nunca reproducido en persistente,
     // o purgada por el prune), no la creamos aquí — el StreamHandle
@@ -2087,52 +2453,56 @@ fn save_position_in(base: &Path, infohash: &str, seconds: f64, duration_seconds:
     }
     let path = entry.join(RESUME_FILE);
 
-    // Regla de completado: si `seconds/duration > 0.95`, borrar y
-    // cortar. El check requiere una duración conocida > 0 — si el
-    // player nos manda `duration_seconds = 0` (ffprobe falló, live
-    // stream), no aplicamos la regla.
+    // Read-modify-write con resiliencia a corrupción: si el fichero
+    // existe pero no parsea (write parcial de una sesión previa),
+    // NO lo sobreescribimos — preservar la posibilidad de recuperación
+    // manual es preferible a machacar con default limpio.
+    let mut store = match read_store(&path) {
+        ResumeParse::Store(s) => s,
+        ResumeParse::Absent => ResumeStore::default(),
+        ResumeParse::Corrupt => return,
+    };
+    let key = file_id.to_string();
+
+    // Regla de completado: si `seconds/duration > 0.95`, borra ESTA
+    // entrada del store. Preserva otras entradas (otros episodios).
+    // El check requiere una duración conocida > 0 — si el player nos
+    // manda `duration_seconds = 0` (ffprobe falló, live stream), no
+    // aplicamos la regla.
     if duration_seconds > 0.0 && seconds / duration_seconds >= COMPLETION_THRESHOLD {
-        let _ = std::fs::remove_file(&path);
+        if store.files.remove(&key).is_some() {
+            if store.files.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else if let Err(e) = write_store_atomic(&path, &store) {
+                eprintln!("[resume] failed to persist store after completion: {e}");
+            }
+        }
         return;
     }
 
-    // Merge-style con resiliencia a corrupción: si el fichero existe
-    // pero no parsea (write parcial de una sesión previa que murió a
-    // mitad), NO lo sobreescribimos — perder datos malos es peor que
-    // preservar la posibilidad de recuperación manual. Solo tratamos
-    // "no existe" como "arranca de cero".
-    let mut resume = match std::fs::read_to_string(&path) {
-        Err(_) => Resume::default(),
-        Ok(s) => match serde_json::from_str::<Resume>(&s) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "[resume] existing file at {} unparseable ({e}); skipping to preserve",
-                    path.display()
-                );
-                return;
-            }
-        },
-    };
-    resume.seconds = Some(seconds.max(0.0));
+    let mut entry_r = store.files.remove(&key).unwrap_or_default();
+    entry_r.seconds = Some(seconds.max(0.0));
     if duration_seconds > 0.0 {
-        resume.duration_seconds = Some(duration_seconds);
+        entry_r.duration_seconds = Some(duration_seconds);
     }
-    resume.updated_at = now_unix();
-    if let Err(e) = write_resume_atomic(&path, &resume) {
+    if episode.is_some() {
+        entry_r.episode = episode;
+    }
+    entry_r.updated_at = now_unix();
+    store.files.insert(key, entry_r);
+
+    if let Err(e) = write_store_atomic(&path, &store) {
         eprintln!("[resume] failed to persist position: {e}");
     }
 }
 
-/// Escribe `resume.json` atómicamente: primero a `<file>.tmp`, luego
-/// `rename` sobre el destino. Evita que un crash o Cmd+Q a mitad de
-/// escritura deje el fichero truncado (que la próxima `load_resume`
-/// interpretaría como corrupto y descartaría el resume entero).
-///
-/// El rename es atómico en POSIX y en NTFS (Windows). No cross-device
-/// (tmp y destino en el mismo dir), así que no falla por EXDEV.
-fn write_resume_atomic(path: &Path, resume: &Resume) -> std::io::Result<()> {
-    let json = serde_json::to_string(resume)
+/// Escribe el store atómicamente. Rename es atómico en POSIX y en
+/// NTFS (Windows). No cross-device (tmp y destino en el mismo dir),
+/// así que no falla por EXDEV. Evita que un crash o Cmd+Q a mitad de
+/// escritura deje el fichero truncado (que la próxima lectura
+/// interpretaría como corrupto y descartaría).
+fn write_store_atomic(path: &Path, store: &ResumeStore) -> std::io::Result<()> {
+    let json = serde_json::to_string(store)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
@@ -2281,6 +2651,91 @@ mod tests {
         assert_eq!(parse_range("bytes=abc-xyz"), None);
     }
 
+    // ── §4 audit series: select_file ─────────────────────────────
+
+    fn mkfiles(items: &[(&str, u64)]) -> Vec<(usize, String, u64)> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, (n, s))| (i, (*n).to_string(), *s))
+            .collect()
+    }
+
+    #[test]
+    fn select_file_default_picks_largest_video() {
+        // Sin target: mayor vídeo. El README (2 MB, ni vídeo) se
+        // ignora aunque sea único fichero .txt.
+        let files = mkfiles(&[
+            ("README.txt", 2 * 1024 * 1024),
+            ("Movie.2019.1080p.mkv", 1500 * 1024 * 1024),
+            ("sample.mkv", 30 * 1024 * 1024),
+        ]);
+        let (id, name, _) = select_file(&files, None).unwrap();
+        assert_eq!(id, 1);
+        assert!(name.contains("Movie.2019"));
+    }
+
+    #[test]
+    fn select_file_target_matches_episode_in_pack() {
+        let files = mkfiles(&[
+            ("Fargo.S02E01.1080p.WEB-DL.x264-GRP.mkv", 900 * 1024 * 1024),
+            ("Fargo.S02E02.1080p.WEB-DL.x264-GRP.mkv", 950 * 1024 * 1024),
+            ("Fargo.S02E03.1080p.WEB-DL.x264-GRP.mkv", 800 * 1024 * 1024),
+        ]);
+        let (id, name, _) = select_file(&files, Some((2, 3))).unwrap();
+        assert_eq!(id, 2);
+        assert!(name.contains("S02E03"));
+    }
+
+    #[test]
+    fn select_file_target_prefers_largest_of_dup_episodes() {
+        // Pack con 720p y 1080p del mismo E03: gana el mayor.
+        let files = mkfiles(&[
+            ("Fargo.S02E03.720p.WEB-DL.x264.mkv", 400 * 1024 * 1024),
+            ("Fargo.S02E03.1080p.WEB-DL.x264.mkv", 900 * 1024 * 1024),
+        ]);
+        let (id, _, _) = select_file(&files, Some((2, 3))).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn select_file_target_falls_back_to_largest_when_no_match() {
+        // Pedimos S05E01 pero el pack solo tiene S02. En vez de
+        // devolver None, cae al mayor — mejor un fichero incorrecto
+        // que un error duro; el user puede corregir con list_files.
+        let files = mkfiles(&[
+            ("Fargo.S02E01.mkv", 900 * 1024 * 1024),
+            ("Fargo.S02E02.mkv", 950 * 1024 * 1024),
+        ]);
+        let (id, _, _) = select_file(&files, Some((5, 1))).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn select_file_ignores_samples_under_50mb() {
+        let files = mkfiles(&[
+            ("Movie.sample.mkv", 40 * 1024 * 1024),
+            ("Movie.1080p.mkv", 700 * 1024 * 1024),
+        ]);
+        let (id, _, _) = select_file(&files, None).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn select_file_falls_back_to_full_pool_when_all_filtered() {
+        // Torrent con nombres no estándar (sin extensión conocida)
+        // NO debe devolver None — se procesa el pool entero.
+        let files = mkfiles(&[("videofile1", 1_000_000_000), ("videofile2", 500_000_000)]);
+        let (id, _, _) = select_file(&files, None).unwrap();
+        assert_eq!(id, 0);
+    }
+
+    #[test]
+    fn select_file_empty_returns_none() {
+        let files: Vec<(usize, String, u64)> = vec![];
+        assert!(select_file(&files, None).is_none());
+    }
+
     #[cfg(feature = "gui")]
     #[test]
     fn is_valid_hls_filename_rejects_playlist() {
@@ -2385,13 +2840,24 @@ mod tests {
             std::fs::create_dir_all(base.join(hash)).unwrap();
         }
 
+        // Wrappers cortos: los tests históricos pasaban seconds+duration.
+        // Con §6 audit añadimos file_id + episode. Estos helpers
+        // encapsulan file_id=0, episode=None → los tests legacy se
+        // leen igual y solo los nuevos usan la firma completa.
+        fn save(base: &std::path::Path, hash: &str, seconds: f64, duration: f64) {
+            save_position_in(base, hash, 0, seconds, duration, None);
+        }
+        fn load(base: &std::path::Path, hash: &str) -> Option<Resume> {
+            load_resume_in(base, hash, 0)
+        }
+
         #[test]
         fn save_position_writes_seconds_and_duration() {
             let td = tempfile::tempdir().unwrap();
             let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             make_entry(td.path(), hash);
-            save_position_in(td.path(), hash, 123.4, 4500.0);
-            let r = load_resume_in(td.path(), hash).unwrap();
+            save(td.path(), hash, 123.4, 4500.0);
+            let r = load(td.path(), hash).unwrap();
             assert_eq!(r.seconds, Some(123.4));
             assert_eq!(r.duration_seconds, Some(4500.0));
         }
@@ -2401,15 +2867,16 @@ mod tests {
             let td = tempfile::tempdir().unwrap();
             let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
             make_entry(td.path(), hash);
-            // Simulamos un Drop previo escribiendo fraction directo.
+            // Simulamos un Drop previo legacy (v1) escribiendo el
+            // shape plano. `load_store` lo migra bajo files["0"].
             let path = td.path().join(hash).join(RESUME_FILE);
             std::fs::write(
                 &path,
                 r#"{"fraction":0.42,"seconds":null,"duration_seconds":null,"updated_at":100}"#,
             )
             .unwrap();
-            save_position_in(td.path(), hash, 60.0, 3600.0);
-            let r = load_resume_in(td.path(), hash).unwrap();
+            save(td.path(), hash, 60.0, 3600.0);
+            let r = load(td.path(), hash).unwrap();
             assert!(
                 (r.fraction - 0.42).abs() < 1e-6,
                 "fraction sobrescrita: {r:?}"
@@ -2423,74 +2890,61 @@ mod tests {
             let td = tempfile::tempdir().unwrap();
             let hash = "cccccccccccccccccccccccccccccccccccccccc";
             make_entry(td.path(), hash);
-            save_position_in(td.path(), hash, 100.0, 1000.0);
-            assert!(load_resume_in(td.path(), hash).is_some());
-            save_position_in(td.path(), hash, 960.0, 1000.0);
-            assert!(load_resume_in(td.path(), hash).is_none());
+            save(td.path(), hash, 100.0, 1000.0);
+            assert!(load(td.path(), hash).is_some());
+            save(td.path(), hash, 960.0, 1000.0);
+            assert!(load(td.path(), hash).is_none());
         }
 
         #[test]
         fn save_position_noop_when_entry_dir_missing() {
             let td = tempfile::tempdir().unwrap();
             let hash = "dddddddddddddddddddddddddddddddddddddddd";
-            save_position_in(td.path(), hash, 30.0, 60.0);
-            assert!(load_resume_in(td.path(), hash).is_none());
+            save(td.path(), hash, 30.0, 60.0);
+            assert!(load(td.path(), hash).is_none());
         }
 
         #[test]
         fn save_position_ignores_zero_duration() {
-            // duration=0 → no aplicamos regla de completado
-            // (evita división por cero) y tampoco escribimos el
-            // campo duration_seconds.
             let td = tempfile::tempdir().unwrap();
             let hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
             make_entry(td.path(), hash);
-            save_position_in(td.path(), hash, 1_000_000.0, 0.0);
-            let r = load_resume_in(td.path(), hash).unwrap();
+            save(td.path(), hash, 1_000_000.0, 0.0);
+            let r = load(td.path(), hash).unwrap();
             assert_eq!(r.seconds, Some(1_000_000.0));
             assert!(r.duration_seconds.is_none());
         }
 
         #[test]
         fn save_position_deletes_at_exactly_95_percent() {
-            // Boundary: >=0.95 borra (95.0/100.0 == 0.95 exacto).
             let td = tempfile::tempdir().unwrap();
             let hash = "ffffffffffffffffffffffffffffffffffffffff";
             make_entry(td.path(), hash);
-            save_position_in(td.path(), hash, 50.0, 100.0);
-            assert!(load_resume_in(td.path(), hash).is_some());
-            save_position_in(td.path(), hash, 95.0, 100.0);
-            assert!(load_resume_in(td.path(), hash).is_none());
+            save(td.path(), hash, 50.0, 100.0);
+            assert!(load(td.path(), hash).is_some());
+            save(td.path(), hash, 95.0, 100.0);
+            assert!(load(td.path(), hash).is_none());
         }
 
         #[test]
         fn save_position_preserves_corrupt_existing_file() {
-            // Si el fichero está corrupto (write parcial anterior),
-            // NO lo sobreescribimos: perder datos malos es peor que
-            // preservar la posibilidad de recuperación manual. La
-            // corrupción se produce en la práctica por Cmd+Q entre
-            // el `write` y el `rename` de una versión antigua, o por
-            // un crash de FS.
             let td = tempfile::tempdir().unwrap();
             let hash = "1111111111111111111111111111111111111111";
             make_entry(td.path(), hash);
             let path = td.path().join(hash).join(RESUME_FILE);
-            let corrupt = r#"{"fraction":0.42,"seconds":123.4"#; // sin cerrar
+            let corrupt = r#"{"fraction":0.42,"seconds":123.4"#;
             std::fs::write(&path, corrupt).unwrap();
-            save_position_in(td.path(), hash, 999.0, 3600.0);
-            // El fichero corrupto sigue tal cual (no lo hemos tocado).
+            save(td.path(), hash, 999.0, 3600.0);
             let after = std::fs::read_to_string(&path).unwrap();
             assert_eq!(after, corrupt);
         }
 
         #[test]
         fn save_position_writes_are_atomic() {
-            // Tras un write válido no debe quedar `.tmp` en el dir:
-            // el rename atómico consume el fichero temporal.
             let td = tempfile::tempdir().unwrap();
             let hash = "2222222222222222222222222222222222222222";
             make_entry(td.path(), hash);
-            save_position_in(td.path(), hash, 42.0, 3600.0);
+            save(td.path(), hash, 42.0, 3600.0);
             let entry_dir = td.path().join(hash);
             let leftovers: Vec<_> = std::fs::read_dir(&entry_dir)
                 .unwrap()
@@ -2503,6 +2957,109 @@ mod tests {
                 })
                 .collect();
             assert!(leftovers.is_empty(), "quedaron `.tmp` sin renombrar");
+        }
+
+        // ── §6 audit: multi-file ─────────────────────────────────
+
+        #[test]
+        fn save_position_isolates_entries_per_file_id() {
+            let td = tempfile::tempdir().unwrap();
+            let hash = "3333333333333333333333333333333333333333";
+            make_entry(td.path(), hash);
+            save_position_in(td.path(), hash, 3, 100.0, 3600.0, None);
+            save_position_in(td.path(), hash, 5, 200.0, 3600.0, None);
+            let r3 = load_resume_in(td.path(), hash, 3).unwrap();
+            let r5 = load_resume_in(td.path(), hash, 5).unwrap();
+            assert_eq!(r3.seconds, Some(100.0));
+            assert_eq!(r5.seconds, Some(200.0));
+        }
+
+        #[test]
+        fn save_position_completion_removes_only_that_file() {
+            // E03 se termina, E02 sigue vivo con su posición.
+            let td = tempfile::tempdir().unwrap();
+            let hash = "4444444444444444444444444444444444444444";
+            make_entry(td.path(), hash);
+            save_position_in(td.path(), hash, 2, 300.0, 3600.0, None);
+            save_position_in(td.path(), hash, 3, 3500.0, 3600.0, None);
+            // E03 (file 3) > 95% → borrado
+            assert!(load_resume_in(td.path(), hash, 3).is_none());
+            // E02 (file 2) intacto
+            let r = load_resume_in(td.path(), hash, 2).unwrap();
+            assert_eq!(r.seconds, Some(300.0));
+        }
+
+        #[test]
+        fn save_position_stores_episode_metadata() {
+            let td = tempfile::tempdir().unwrap();
+            let hash = "5555555555555555555555555555555555555555";
+            make_entry(td.path(), hash);
+            let ep = ResumeEpisode {
+                season: 2,
+                episode: 3,
+                tmdb_id: Some(31234),
+            };
+            save_position_in(td.path(), hash, 3, 100.0, 3600.0, Some(ep));
+            let r = load_resume_in(td.path(), hash, 3).unwrap();
+            let e = r.episode.expect("episode meta debía persistirse");
+            assert_eq!(e.season, 2);
+            assert_eq!(e.episode, 3);
+            assert_eq!(e.tmdb_id, Some(31234));
+        }
+
+        #[test]
+        fn load_resume_any_returns_most_recent_by_updated_at() {
+            let td = tempfile::tempdir().unwrap();
+            let hash = "6666666666666666666666666666666666666666";
+            make_entry(td.path(), hash);
+            save_position_in(td.path(), hash, 1, 10.0, 3600.0, None);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            save_position_in(td.path(), hash, 2, 20.0, 3600.0, None);
+            let r = load_resume_any_in(td.path(), hash, None).unwrap();
+            assert_eq!(r.seconds, Some(20.0));
+        }
+
+        #[test]
+        fn load_resume_any_filters_by_episode() {
+            let td = tempfile::tempdir().unwrap();
+            let hash = "7777777777777777777777777777777777777777";
+            make_entry(td.path(), hash);
+            let ep_a = ResumeEpisode {
+                season: 1,
+                episode: 1,
+                tmdb_id: None,
+            };
+            let ep_b = ResumeEpisode {
+                season: 2,
+                episode: 3,
+                tmdb_id: None,
+            };
+            save_position_in(td.path(), hash, 0, 10.0, 3600.0, Some(ep_a));
+            save_position_in(td.path(), hash, 5, 400.0, 3600.0, Some(ep_b));
+            let r = load_resume_any_in(td.path(), hash, Some((2, 3))).unwrap();
+            assert_eq!(r.seconds, Some(400.0));
+            let none = load_resume_any_in(td.path(), hash, Some((9, 9)));
+            assert!(none.is_none());
+        }
+
+        #[test]
+        fn legacy_v1_file_migrates_to_files_zero_on_load() {
+            // Un resume.json escrito por el binario antiguo (plano)
+            // debe leerse como si estuviera bajo files["0"].
+            let td = tempfile::tempdir().unwrap();
+            let hash = "8888888888888888888888888888888888888888";
+            make_entry(td.path(), hash);
+            let path = td.path().join(hash).join(RESUME_FILE);
+            std::fs::write(
+                &path,
+                r#"{"fraction":0.5,"seconds":600.0,"duration_seconds":3600.0,"updated_at":42}"#,
+            )
+            .unwrap();
+            let r = load_resume_in(td.path(), hash, 0).unwrap();
+            assert_eq!(r.seconds, Some(600.0));
+            assert!((r.fraction - 0.5).abs() < 1e-6);
+            // Otros file_ids no matchean.
+            assert!(load_resume_in(td.path(), hash, 3).is_none());
         }
     }
 }

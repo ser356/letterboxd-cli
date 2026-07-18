@@ -33,7 +33,7 @@ use crate::progress::Progress;
 use crate::recommend::{build_candidate_pool, enrich_batch, Recommendation};
 use crate::stream::{self, StreamHandle, StreamStats};
 use crate::subtitles::{self, Subtitle};
-use crate::tmdb::{MovieView, TmdbClient, TmdbMovie};
+use crate::tmdb::{self, MovieView, TmdbClient, TmdbMovie};
 use crate::torrents::{
     self, merge_provider_statuses, release_starts_with, split_trailing_year, AudioHint, MovieQuery,
     ProviderStatus, Torrent,
@@ -147,14 +147,34 @@ fn save_torrent_cache(cache: &HashMap<String, CachedTorrentSearch>) {
 
 /// Key estable para el caché de torrents. Prefiere el `imdb_id`
 /// (canónico, cross-idioma); si no lo hay, cae a `direct:<norm>:<year>`.
+///
+/// Series (§7 audit): añade sufijo `:sSSeEE` o `:sSS` cuando aplica
+/// para que un episodio no colisione con otro del mismo IMDb, ni
+/// con la peli homónima si TMDB reportara el mismo imdb (raro).
 fn torrent_cache_key(imdb_id: Option<&str>, title: &str, year: Option<u16>) -> String {
-    if let Some(id) = imdb_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        return id.to_string();
-    }
-    let norm = normalize_query(title);
-    match year {
-        Some(y) => format!("direct:{norm}:{y}"),
-        None => format!("direct:{norm}:-"),
+    torrent_cache_key_with_ep(imdb_id, title, year, None, None)
+}
+
+fn torrent_cache_key_with_ep(
+    imdb_id: Option<&str>,
+    title: &str,
+    year: Option<u16>,
+    season: Option<u16>,
+    episode: Option<u16>,
+) -> String {
+    let base = if let Some(id) = imdb_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        id.to_string()
+    } else {
+        let norm = normalize_query(title);
+        match year {
+            Some(y) => format!("direct:{norm}:{y}"),
+            None => format!("direct:{norm}:-"),
+        }
+    };
+    match (season, episode) {
+        (Some(s), Some(e)) => format!("{base}:s{s:02}e{e:02}"),
+        (Some(s), None) => format!("{base}:s{s:02}"),
+        _ => base,
     }
 }
 
@@ -608,6 +628,45 @@ async fn get_movie_view(
     out
 }
 
+/// Detalle de una serie para la vista SeriesDetail: metadata general
+/// (name, overview, poster, backdrop) + lista de temporadas + IMDb id
+/// (necesario para los providers direccionables por id — EZTV,
+/// Torznab tvsearch). §7 audit series.
+#[tauri::command]
+async fn get_series_view(
+    tmdb_id: u64,
+    state: State<'_, AppState>,
+) -> Result<Option<tmdb::SeriesDetails>, String> {
+    let bearer = state.config.lock().await.tmdb_bearer_token.clone();
+    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let start = std::time::Instant::now();
+    let out = tmdb
+        .get_series_details(tmdb_id)
+        .await
+        .map_err(|e| e.to_string());
+    eprintln!(
+        "[gui] get_series_view tmdb_id={tmdb_id} en {}ms",
+        start.elapsed().as_millis()
+    );
+    out
+}
+
+/// Episodios de una temporada. Se llama cuando el user selecciona un
+/// tab de temporada en la vista SeriesDetail. Cacheado por TMDB
+/// client con TTL largo (24 h) — las temporadas emitidas no cambian.
+#[tauri::command]
+async fn get_series_season(
+    tmdb_id: u64,
+    season: u16,
+    state: State<'_, AppState>,
+) -> Result<Vec<tmdb::SeriesEpisode>, String> {
+    let bearer = state.config.lock().await.tmdb_bearer_token.clone();
+    let tmdb = TmdbClient::new(&state.http, &bearer);
+    tmdb.get_season(tmdb_id, season)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Búsqueda TMDB por texto libre. Alimenta la pantalla intermedia de la
 /// GUI: el user teclea "matrix" y ve posters de todas las coincidencias
 /// antes de decidir de cuál quiere torrents. Evita el problema de "he
@@ -642,10 +701,13 @@ async fn search_movies_tmdb(
 
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
     let tmdb = TmdbClient::new(&state.http, &bearer);
-    let movies = tmdb
-        .search_movies(&query)
-        .await
-        .map_err(|e| e.to_string())?;
+    // §7 audit series: `search_multi` mezcla movie + tv en el mismo
+    // request (single-shot) y respeta el ranking de popularidad de
+    // TMDB. Cada hit trae `kind` para que el frontend pinte badges
+    // Movie/Series. Sondeo de torrents (`torrent_count`) SOLO para
+    // pelis — las series no tienen "torrent único" y el conteo
+    // engañaría (siempre 0 sin S/E, no representativo).
+    let movies = tmdb.search_multi(&query).await.map_err(|e| e.to_string())?;
 
     let providers = torrents::default_providers();
     let http = state.http.clone();
@@ -661,6 +723,13 @@ async fn search_movies_tmdb(
         let providers = providers.clone();
         let http = http.clone();
         async move {
+            // Series: skip el sondeo. Sin S/E no hay query útil y
+            // los providers de series (EZTV, torznab tvsearch)
+            // devolverían todos los episodios — el conteo no
+            // significaría nada. Frontend pintará "Serie" sin count.
+            if matches!(m.kind, crate::tmdb::MediaKind::Series) {
+                return (idx, m, 0u32);
+            }
             let q = MovieQuery {
                 title: m.title.clone(),
                 year: m.year(),
@@ -775,6 +844,10 @@ struct TorrentDto {
     /// Código ISO 639-1 del audio inferido (`"en"`, `"es"`, `"ru"`…) o
     /// marcador especial (`"multi"`, `"unknown"`, `"dub"`).
     audio: String,
+    /// Cómo matchea contra la query (§7 audit): `"movie"`,
+    /// `"episode"`, `"season_pack"`, `"series_pack"`. La UI pinta un
+    /// badge acorde ("E03" / "Pack S01" / "Serie completa").
+    match_kind: String,
 }
 
 impl TorrentDto {
@@ -790,6 +863,12 @@ impl TorrentDto {
             AudioHint::Multi => "multi".to_string(),
             AudioHint::Unknown => "unknown".to_string(),
         };
+        let match_kind = match t.match_kind {
+            torrents::MatchKind::Movie => "movie",
+            torrents::MatchKind::Episode => "episode",
+            torrents::MatchKind::SeasonPack => "season_pack",
+            torrents::MatchKind::SeriesPack => "series_pack",
+        };
         Self {
             title: t.title,
             magnet: t.magnet,
@@ -799,6 +878,7 @@ impl TorrentDto {
             quality: t.quality,
             source: t.source,
             audio,
+            match_kind: match_kind.to_string(),
         }
     }
 }
@@ -1010,6 +1090,149 @@ async fn search_torrents_by_tmdb(
     Ok(result)
 }
 
+/// Búsqueda de torrents de un episodio (o pack de temporada, si
+/// `episode = None`) de una serie. §7 audit series.
+///
+/// Flujo:
+///   1. TMDB `/tv/{id}` para obtener nombre original + IMDb id + alt
+///      titles + idioma original — el imdb_id es CLAVE para EZTV y
+///      Torznab tvsearch.
+///   2. Construimos hasta 3 variantes de título (original, inglés,
+///      mejor alt) igual que la búsqueda de películas.
+///   3. Lanzamos `search_all` con `kind=Series, season, episode` en
+///      paralelo por variante y mergemos por infohash.
+///
+/// Se cachea con clave `imdb:sSSeEE` (o `direct:norm:year:sSS` si no
+/// hay imdb). El TTL efectivo lo decide `torrent_cache_ttl`.
+#[tauri::command]
+async fn search_torrents_series(
+    tmdb_id: u64,
+    season: u16,
+    episode: Option<u16>,
+    state: State<'_, AppState>,
+) -> Result<TorrentSearchResult, String> {
+    let bearer = state.config.lock().await.tmdb_bearer_token.clone();
+    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let details = tmdb
+        .get_series_details(tmdb_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let details = details.ok_or_else(|| format!("Serie tmdb_id={tmdb_id} no encontrada"))?;
+
+    let imdb_key = details.imdb_id.clone();
+    let year: Option<u16> = details
+        .first_air_date
+        .as_deref()
+        .and_then(|s| s.get(0..4).and_then(|y| y.parse::<u16>().ok()));
+    let cache_key = torrent_cache_key_with_ep(
+        imdb_key.as_deref(),
+        &details.name,
+        year,
+        Some(season),
+        episode,
+    );
+    if let Some(hit) = torrent_cache_get_fresh(&*state.torrent_cache.lock().await, &cache_key) {
+        return Ok(hit);
+    }
+
+    // Título canónico para la UI. Preferimos el nombre en el idioma
+    // original (evita "Cazadores de sombras" cuando el user busca
+    // "Shadowhunters") — el name localizado se usa para display.
+    let orig = details
+        .original_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| details.name.clone());
+    let english = if orig != details.name {
+        Some(details.name.clone())
+    } else {
+        None
+    };
+    let original_language = details.original_language.clone();
+    let imdb_id = details.imdb_id.clone();
+    let release_date = details.first_air_date.clone();
+
+    // Variantes: original + inglés. (Series usan menos alt-titles
+    // relevantes que pelis; con 2 basta para 95% del catálogo.)
+    const MAX_VARIANTS: usize = 3;
+    let mut variants: Vec<String> = Vec::new();
+    let mut seen_norm: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push_variant = |v: String, variants: &mut Vec<String>| {
+        let norm = torrents::release_name::normalize_title(&v);
+        if norm.is_empty() {
+            return;
+        }
+        if seen_norm.insert(norm) && variants.len() < MAX_VARIANTS {
+            variants.push(v);
+        }
+    };
+    push_variant(orig.clone(), &mut variants);
+    if let Some(eng) = english.as_ref() {
+        push_variant(eng.clone(), &mut variants);
+    }
+
+    let filter_variants = variants.clone();
+    let providers = torrents::default_providers();
+
+    let variant_futures = variants.iter().cloned().map(|v| {
+        let q = MovieQuery {
+            title: v,
+            year,
+            imdb_id: imdb_id.clone(),
+            tmdb_id: Some(tmdb_id),
+            original_language: original_language.clone(),
+            title_variants: filter_variants.clone(),
+            kind: crate::tmdb::MediaKind::Series,
+            season: Some(season),
+            episode,
+        };
+        let http = state.http.clone();
+        let providers = providers.clone();
+        async move { torrents::search_all(&http, &providers, &q, 3, 40).await }
+    });
+    let outcomes: Vec<torrents::SearchOutcome> = futures::future::join_all(variant_futures).await;
+
+    use std::collections::HashMap;
+    let mut merged: HashMap<String, torrents::Torrent> = HashMap::new();
+    let mut providers_status: Vec<ProviderStatus> = Vec::new();
+    for o in outcomes {
+        providers_status = merge_provider_statuses(providers_status, o.providers);
+        for t in o.results {
+            match merged.get_mut(&t.infohash) {
+                Some(prev) if prev.seeders < t.seeders => *prev = t,
+                Some(_) => {}
+                None => {
+                    merged.insert(t.infohash.clone(), t);
+                }
+            }
+        }
+    }
+    let mut list: Vec<torrents::Torrent> = merged.into_values().collect();
+    list.sort_by_key(|t| std::cmp::Reverse(t.seeders));
+    list.truncate(40);
+
+    let result = TorrentSearchResult {
+        title: orig,
+        imdb_id,
+        original_language: original_language.clone(),
+        year,
+        // Runtime medio de un episodio (min): no lo pedimos aún
+        // desde /tv/{id} — se puede sacar de get_season si hace
+        // falta. Dejamos None; el player HTML no depende de él
+        // (usa duration_seconds de ffprobe).
+        runtime_minutes: None,
+        results: list
+            .into_iter()
+            .map(|t| TorrentDto::from_torrent(t, original_language.as_deref()))
+            .collect(),
+        providers: providers_status,
+        release_date,
+    };
+
+    torrent_cache_put(&mut *state.torrent_cache.lock().await, cache_key, &result);
+    Ok(result)
+}
+
 /// Búsqueda directa: el user teclea un título en la vista Search. No pasa
 /// por Letterboxd/TMDB.
 #[tauri::command]
@@ -1081,7 +1304,7 @@ struct StreamInfo {
 
 #[tauri::command]
 async fn start_stream(magnet: String, state: State<'_, AppState>) -> Result<StreamInfo, String> {
-    start_stream_inner(magnet, None, None, PlayerMode::Vlc, &state).await
+    start_stream_inner(magnet, None, None, None, PlayerMode::Vlc, &state).await
 }
 
 /// Como `start_stream`, pero pasando explícitamente un path de subtítulo
@@ -1093,12 +1316,16 @@ async fn start_stream_with_sub(
     magnet: String,
     sub_path: Option<String>,
     resume_seconds: Option<u32>,
+    season: Option<u16>,
+    episode: Option<u16>,
     state: State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
+    let target = season.zip(episode);
     start_stream_inner(
         magnet,
         sub_path.map(PathBuf::from),
         resume_seconds,
+        target,
         PlayerMode::Vlc,
         &state,
     )
@@ -1110,12 +1337,28 @@ async fn start_stream_with_sub(
 /// (con `/play.mp4` como path para pasar por ffmpeg / transmux). Los
 /// subtítulos los descarga el frontend por separado vía endpoints
 /// dedicados.
+///
+/// `season`/`episode`: cuando el magnet es un season pack de una
+/// serie, seleccionan el fichero del episodio pedido dentro del
+/// torrent (§4 audit series). Ambos deben venir juntos o ninguno.
 #[tauri::command]
 async fn start_stream_html(
     magnet: String,
+    season: Option<u16>,
+    episode: Option<u16>,
     state: State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
-    start_stream_inner(magnet, None, None, PlayerMode::Html, &state).await
+    let target = season.zip(episode);
+    start_stream_inner(magnet, None, None, target, PlayerMode::Html, &state).await
+}
+
+/// Lista los ficheros de un torrent multi-file sin arrancar streaming.
+/// Devuelve nombre, tamaño y S/E parseados por fichero — para que la
+/// UI ofrezca selección manual cuando la heurística de S+E no dé con
+/// el episodio (packs con numeración absoluta de anime, encodings raros).
+#[tauri::command]
+async fn list_torrent_files(magnet: String) -> Result<Vec<stream::TorrentFileInfo>, String> {
+    stream::list_files(magnet).await.map_err(|e| e.to_string())
 }
 
 #[derive(Copy, Clone)]
@@ -1130,10 +1373,13 @@ async fn start_stream_inner(
     magnet: String,
     sub_path: Option<PathBuf>,
     resume_seconds: Option<u32>,
+    target: Option<(u16, u16)>,
     mode: PlayerMode,
     state: &State<'_, AppState>,
 ) -> Result<StreamInfo, String> {
-    let handle = stream::start(magnet).await.map_err(|e| e.to_string())?;
+    let handle = stream::start_with_target(magnet, target)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut id_lock = state.next_stream_id.lock().await;
     *id_lock += 1;
@@ -1246,18 +1492,31 @@ struct ResumeDto {
     seconds: Option<f64>,
     duration_seconds: Option<f64>,
     updated_at: u64,
+    season: Option<u16>,
+    episode: Option<u16>,
 }
 
 #[tauri::command]
-async fn get_resume(magnet: String) -> Result<Option<ResumeDto>, String> {
+async fn get_resume(
+    magnet: String,
+    season: Option<u16>,
+    episode: Option<u16>,
+) -> Result<Option<ResumeDto>, String> {
     let Some(hash) = stream::parse_infohash(&magnet) else {
         return Ok(None);
     };
-    Ok(stream::load_resume(&hash).map(|r| ResumeDto {
+    // Antes de start_stream no conocemos el file_id → usamos
+    // `load_resume_any`. Cuando el user viene del flujo de serie
+    // pasa (season, episode) → filtra a la entrada exacta y no
+    // devuelve el resume de otro episodio del mismo pack.
+    let target = season.zip(episode);
+    Ok(stream::load_resume_any(&hash, target).map(|r| ResumeDto {
         fraction: r.fraction,
         seconds: r.seconds,
         duration_seconds: r.duration_seconds,
         updated_at: r.updated_at,
+        season: r.episode.as_ref().map(|e| e.season),
+        episode: r.episode.as_ref().map(|e| e.episode),
     }))
 }
 
@@ -1266,6 +1525,10 @@ async fn get_resume(magnet: String) -> Result<Option<ResumeDto>, String> {
 /// duración detectada por ffprobe. Backend persiste ambos valores en
 /// `resume.json` (merge-style, sin pisar `fraction`); si la posición
 /// supera el 95% del runtime, borra el resume (peli terminada).
+///
+/// `season`/`episode`/`tmdb_id` (opcionales) se guardan como
+/// metadata de episodio en la entrada del store — habilita
+/// "continuar viendo" y "siguiente episodio" (§6 audit).
 ///
 /// Errores no bloquean al player: si el `stream_id` ya no está vivo
 /// (stopStream previo, race con navigate away), devolvemos Ok sin más.
@@ -1276,6 +1539,9 @@ async fn report_position(
     stream_id: u64,
     seconds: f64,
     duration_seconds: f64,
+    season: Option<u16>,
+    episode: Option<u16>,
+    tmdb_id: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Sanea entradas no finitas: HLS puede reportar `duration = Infinity`
@@ -1286,14 +1552,19 @@ async fn report_position(
     if !seconds.is_finite() || !duration_seconds.is_finite() {
         return Ok(());
     }
-    let infohash = {
+    let handle_info = {
         let streams = state.streams.lock().await;
         streams
             .get(&stream_id)
-            .and_then(|s| s.handle.infohash.clone())
+            .map(|s| (s.handle.infohash.clone(), s.handle.file_id))
     };
-    if let Some(hash) = infohash {
-        stream::save_position(&hash, seconds, duration_seconds);
+    if let Some((Some(hash), file_id)) = handle_info {
+        let ep = season.zip(episode).map(|(s, e)| stream::ResumeEpisode {
+            season: s,
+            episode: e,
+            tmdb_id,
+        });
+        stream::save_position(&hash, file_id, seconds, duration_seconds, ep);
     }
     Ok(())
 }
@@ -1320,6 +1591,8 @@ async fn search_subtitles(
     stream_id: Option<u64>,
     imdb_id: Option<String>,
     query: Option<String>,
+    season: Option<u16>,
+    episode: Option<u16>,
     languages: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<Subtitle>, String> {
@@ -1382,7 +1655,7 @@ async fn search_subtitles(
     let http_ref = &state.http;
     let hash_fut = async {
         if let Some(hash) = moviehash.as_deref() {
-            match subtitles::search(http_ref, Some(hash), None, None, &langs).await {
+            match subtitles::search(http_ref, Some(hash), None, None, None, None, &langs).await {
                 Ok(mut subs) => {
                     for s in &mut subs {
                         s.hash_match = true;
@@ -1397,7 +1670,16 @@ async fn search_subtitles(
     };
     let catalog_fut = async {
         if imdb_id.is_some() || query.is_some() {
-            subtitles::search(http_ref, None, imdb_id.as_deref(), query.as_deref(), &langs).await
+            subtitles::search(
+                http_ref,
+                None,
+                imdb_id.as_deref(),
+                query.as_deref(),
+                season,
+                episode,
+                &langs,
+            )
+            .await
         } else {
             Ok(Vec::new())
         }
@@ -1696,13 +1978,17 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             undismiss_recommendation,
             list_dismissed,
             get_movie_view,
+            get_series_view,
+            get_series_season,
             search_movies_tmdb,
             search_torrents_by_tmdb,
+            search_torrents_series,
             search_torrents_direct,
             open_magnet,
             start_stream,
             start_stream_with_sub,
             start_stream_html,
+            list_torrent_files,
             ffmpeg_available,
             stream_stats,
             stop_stream,

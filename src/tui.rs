@@ -825,6 +825,8 @@ async fn run_app(
                                         None,
                                         imdb.as_deref(),
                                         Some(&query),
+                                        None,
+                                        None,
                                         subtitles::DEFAULT_LANGUAGES,
                                     )
                                     .await

@@ -118,8 +118,8 @@ pub fn compute_moviehash(file_len: u64, first_64k: &[u8], last_64k: &[u8]) -> Op
     Some(format!("{hash:016x}"))
 }
 
-/// Busca subtítulos para una película. Al menos uno de `imdb_id`,
-/// `moviehash` o `query` debe estar informado.
+/// Busca subtítulos para una película o episodio de serie. Al menos
+/// uno de `imdb_id`, `moviehash` o `query` debe estar informado.
 ///
 /// * `moviehash` — hash OpenSubtitles del fichero (16 hex chars). Es
 ///   el filtro más preciso posible: identifica el fichero exacto
@@ -127,20 +127,29 @@ pub fn compute_moviehash(file_len: u64, first_64k: &[u8], last_64k: &[u8]) -> Op
 ///   coincide → sincronización perfecta con el release. Cuando lo
 ///   tenemos, es unívoco y no necesitamos imdb_id ni query.
 /// * `imdb_id` — IMDb ID (`ttXXXXXXX` o solo el número). Filtra a la
-///   película exacta.
+///   película exacta. Para series episódicas, este imdb_id debe ser
+///   el de la SERIE (parent), no el del episodio — se combina con
+///   `season`/`episode` para direccionar el episodio concreto.
 /// * `query` — texto libre. Cuando es el `release name` del torrent,
 ///   OpenSubtitles rankea los subs por parecido al release → primer
 ///   resultado ≈ edición correcta.
+/// * `season` + `episode` — para subs de un episodio de serie.
+///   Cuando `imdb_id` está presente, se envían como triplete
+///   (`parent_imdb_id + season_number + episode_number`) — son un
+///   único selector lógico, no filtros AND independientes. Sin
+///   `imdb_id` se usa como refuerzo del `query`.
 /// * `languages` — coma-separado, ej. `"es,en,fr"`. Vacío = todos.
 ///
-/// Prioridad: `moviehash` > `imdb_id` > `query`. Solo el primero
-/// presente se envía al API (evita AND estricto que descartaría
-/// subs válidos).
+/// Prioridad: `moviehash` > `parent_imdb + S + E` > `imdb_id` > `query`.
+/// Solo el primero presente se envía como filtro principal (evita
+/// AND estricto que descartaría subs válidos).
 pub async fn search(
     http: &Client,
     moviehash: Option<&str>,
     imdb_id: Option<&str>,
     query: Option<&str>,
+    season: Option<u16>,
+    episode: Option<u16>,
     languages: &str,
 ) -> Result<Vec<Subtitle>> {
     let key = api_key().context("No hay OPENSUBTITLES_API_KEY (ni bakeada ni en env)")?;
@@ -148,20 +157,35 @@ pub async fn search(
     // Construimos la query manualmente en el mismo orden que la doc para
     // que la cache-key del server no varíe entre llamadas equivalentes.
     //
-    // IMPORTANTE: enviamos SOLO UNO de los filtros (hash, imdb, query)
-    // en orden de precisión. OpenSubtitles hace AND estricto entre
-    // varios de estos filtros: si combinamos imdb_id + query, filtraría
-    // los subs cuyo `release` NO matchee la query, aunque el imdb_id
-    // sea correcto — así se dejaban 200+ subs de Salò invisibles porque
-    // ningún release usa el título italiano completo.
+    // IMPORTANTE: enviamos SOLO UNO de los filtros PRINCIPALES en
+    // orden de precisión. OpenSubtitles hace AND estricto entre
+    // varios: si combinamos imdb_id + query, filtraría los subs cuyo
+    // `release` NO matchee la query, aunque el imdb_id sea correcto.
+    //
+    // Excepción documentada: `parent_imdb_id + season_number +
+    // episode_number` SÍ van juntos porque son un único selector
+    // lógico ("este episodio de esta serie"), no filtros
+    // independientes. Es la ruta canónica para subs de episodios.
     let mut params: Vec<(&str, String)> = Vec::new();
     if let Some(h) = moviehash.filter(|s| !s.is_empty()) {
         params.push(("moviehash", h.to_lowercase()));
+    } else if let (Some(id), Some(s), Some(e)) = (imdb_id, season, episode) {
+        let n = id.trim_start_matches("tt");
+        params.push(("parent_imdb_id", n.to_string()));
+        params.push(("season_number", s.to_string()));
+        params.push(("episode_number", e.to_string()));
     } else if let Some(id) = imdb_id {
         let n = id.trim_start_matches("tt");
         params.push(("imdb_id", n.to_string()));
     } else if let Some(q) = query {
-        params.push(("query", q.to_string()));
+        // Sin imdb pero con S/E: enriquecemos el query textual con
+        // "SxxEyy" para que el ranker de OpenSubtitles prefiera subs
+        // del episodio pedido. Sin S/E se queda como estaba.
+        let q_full = match (season, episode) {
+            (Some(s), Some(e)) => format!("{} S{:02}E{:02}", q, s, e),
+            _ => q.to_string(),
+        };
+        params.push(("query", q_full));
     }
     if !languages.is_empty() {
         params.push(("languages", languages.to_string()));
