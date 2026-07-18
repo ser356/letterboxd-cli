@@ -468,14 +468,9 @@ pub fn compute_direct_playable(info: &MediaInfo, caps: &ClientCapabilities) -> b
     if !caps.supports(&video.codec) {
         return false;
     }
-    let audio = info
-        .streams
-        .iter()
-        .find(|s| s.kind == StreamKind::Audio);
+    let audio = info.streams.iter().find(|s| s.kind == StreamKind::Audio);
     let audio_ok = audio
-        .map(|s| {
-            DIRECT_AUDIO_CODECS.contains(&s.codec.as_str()) && caps.supports(&s.codec)
-        })
+        .map(|s| DIRECT_AUDIO_CODECS.contains(&s.codec.as_str()) && caps.supports(&s.codec))
         .unwrap_or(false);
     if !audio_ok {
         return false;

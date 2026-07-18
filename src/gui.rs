@@ -1653,9 +1653,7 @@ async fn ffmpeg_available() -> Result<bool, String> {
 /// `compute_direct_playable`. Idempotente — llamar dos veces
 /// sobreescribe con la última.
 #[tauri::command]
-async fn set_client_capabilities(
-    caps: crate::ffmpeg::ClientCapabilities,
-) -> Result<(), String> {
+async fn set_client_capabilities(caps: crate::ffmpeg::ClientCapabilities) -> Result<(), String> {
     stream::set_client_capabilities(caps);
     Ok(())
 }

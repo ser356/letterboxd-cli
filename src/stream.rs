@@ -1471,7 +1471,10 @@ async fn try_build_copy_grid(
     // pantallas SDR. Bailamos → el caller cae a transcode con la
     // cadena zscale+tonemap.
     if is_hdr_stream(video) {
-        bail!("HDR (color_transfer={:?}) → transcode+tonemap", video.color_transfer);
+        bail!(
+            "HDR (color_transfer={:?}) → transcode+tonemap",
+            video.color_transfer
+        );
     }
     // Fetch keyframe index. Cliente HTTP reutilizable: creamos uno
     // simple aquí (localhost, sin cookies ni auth).
@@ -1484,9 +1487,7 @@ async fn try_build_copy_grid(
     let max_gap = idx.max_gap_seconds();
     const MAX_GOP_SECONDS: f64 = 10.0;
     if max_gap > MAX_GOP_SECONDS {
-        bail!(
-            "GOP máximo {max_gap:.1}s > {MAX_GOP_SECONDS}s (seek en copy sería inaceptable)"
-        );
+        bail!("GOP máximo {max_gap:.1}s > {MAX_GOP_SECONDS}s (seek en copy sería inaceptable)");
     }
     Ok(idx.variable_segments(HLS_SEG_SECS))
 }
@@ -1650,7 +1651,13 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
             .get(idx as usize)
             .map(|(s, _)| *s)
             .unwrap_or_else(|| idx as f64 * HLS_SEG_SECS);
-        (hls.job.take(), hls.dir.clone(), hls.audio_idx, hls.mode, start)
+        (
+            hls.job.take(),
+            hls.dir.clone(),
+            hls.audio_idx,
+            hls.mode,
+            start,
+        )
     };
     if let Some(mut old) = old_job {
         // Cancelar la Range GET del ffmpeg viejo contra `/video`:

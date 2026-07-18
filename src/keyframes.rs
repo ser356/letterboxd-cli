@@ -124,12 +124,7 @@ impl KeyframeIndex {
 /// Cliente HTTP para el fetch de índices. Se pasa el `reqwest::Client`
 /// desde fuera para reutilizar la conexión (nuestro servidor local
 /// está en `127.0.0.1`, un solo host).
-async fn ranged_get(
-    client: &reqwest::Client,
-    url: &str,
-    start: u64,
-    end: u64,
-) -> Result<Vec<u8>> {
+async fn ranged_get(client: &reqwest::Client, url: &str, start: u64, end: u64) -> Result<Vec<u8>> {
     let resp = client
         .get(url)
         .header(header::RANGE, format!("bytes={start}-{end}"))
@@ -405,17 +400,14 @@ fn scan_master<F: FnMut(&[u8], usize, u64) -> Result<()>>(
 ///
 /// Los offsets del SeekHead son RELATIVOS al inicio del data del
 /// Segment.
-pub async fn fetch_mkv_keyframes(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<KeyframeIndex> {
+pub async fn fetch_mkv_keyframes(client: &reqwest::Client, url: &str) -> Result<KeyframeIndex> {
     // 1) Header + inicio del Segment + primer SeekHead.
     let total_len = resource_length(client, url).await?;
     let head_end = (65_535).min(total_len.saturating_sub(1));
     let head = ranged_get(client, url, 0, head_end).await?;
 
-    let (segment_data_start, _segment_data_size) = find_segment_start(&head, 0)
-        .context("MKV: no encontré Segment en los primeros 64 KB")?;
+    let (segment_data_start, _segment_data_size) =
+        find_segment_start(&head, 0).context("MKV: no encontré Segment en los primeros 64 KB")?;
     let seg_rel_start = segment_data_start as usize;
     let seek_head_payload = &head[seg_rel_start..];
 
@@ -442,7 +434,11 @@ pub async fn fetch_mkv_keyframes(
         let more = ranged_get(client, url, need_start, need_end).await?;
         parse_seek_head(&more, sh_hdr.size, &mut targets)?;
     } else {
-        parse_seek_head(&seek_head_payload[sh_start..sh_end], sh_hdr.size, &mut targets)?;
+        parse_seek_head(
+            &seek_head_payload[sh_start..sh_end],
+            sh_hdr.size,
+            &mut targets,
+        )?;
     }
 
     // 2) Buscar los offsets que necesitamos: Info, Tracks, Cues.
@@ -475,9 +471,15 @@ pub async fn fetch_mkv_keyframes(
     };
 
     // 5) Fetch Cues → timestamps del video track.
-    let timestamps =
-        fetch_cues(client, url, segment_data_start + cues_off, video_track, tick_seconds, total_len)
-            .await?;
+    let timestamps = fetch_cues(
+        client,
+        url,
+        segment_data_start + cues_off,
+        video_track,
+        tick_seconds,
+        total_len,
+    )
+    .await?;
 
     if timestamps.is_empty() {
         bail!("MKV Cues no contenía keyframes para el track {video_track}");
