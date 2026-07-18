@@ -111,4 +111,41 @@ export const it: Record<string, string> = {
   'resume.at': 'Eri a {{time}}',
   'resume.resume': 'Riprendi',
   'resume.restart': 'Ricomincia',
+  'resume.eyebrow': 'Ne hai già visto una parte',
+  'resume.question': 'Riprendere da dove eri rimasto?',
+  'resume.progress': 'Progresso salvato',
+  'resume.jumpTo': 'Salta a {{time}}',
+  'resume.ignorePrevious': 'Ignorare il progresso precedente',
+  'resume.confirm': 'conferma',
+
+  // ── Home / Recs ───────────────────────────────────────
+  'home.headline': 'Cosa guardiamo oggi?',
+  'home.subhead': 'Scegli un’opzione o premi Invio su quella evidenziata.',
+  'home.sessionActive': 'Sessione attiva',
+  'home.up': 'Su',
+  'home.down': 'Giù',
+  'home.select': 'Seleziona',
+  'home.optionRecsLabel': 'Consigli da Letterboxd',
+  'home.optionRecsHint': 'Genera e sfoglia film consigliati in base alla tua cronologia.',
+  'home.optionSearchLabel': 'Cerca torrent direttamente',
+  'home.optionSearchHint': 'Digita un titolo e cerca torrent senza passare da Letterboxd.',
+
+  // ── HotkeyBar tooltip ────────────────────────────────
+  'hotkey.shortcutTitle': 'Scorciatoia: {{key}}',
+
+  // ── StreamPanel ──────────────────────────────────────
+  'streamPanel.streaming': 'In riproduzione',
+  'streamPanel.stop': 'Ferma',
+  'streamPanel.hintPre': 'Premi',
+  'streamPanel.hintMid': 'per riprodurre il torrent selezionato. I sottotitoli si scelgono dal player.',
+  'streamPanel.hintPost': 'invia il magnet al tuo client BitTorrent predefinito.',
+
+  // ── Login extras ─────────────────────────────────────
+  'login.title': 'Accedi',
+  'login.username': 'Utente',
+  'login.password': 'Password',
+  'login.submit': 'Accedi',
+  'login.hint': 'Le credenziali restano in locale; non lasciano mai il tuo dispositivo.',
+  'login.onlyDesktop': 'Questa finestra funziona solo dentro l’app desktop.',
+  'login.verifying': 'Verifica…',
 }

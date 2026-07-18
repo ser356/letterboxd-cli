@@ -94,6 +94,14 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Locale UI actual (BCP47) leyendo `preferences.json` fresh — barato
+/// (single fs read) y evita capturar el valor al crear el `AppState`
+/// (que se resetearía sólo al reiniciar). Cuando el user cambia el
+/// idioma en Ajustes, la próxima llamada TMDB usa el nuevo.
+fn current_ui_lang() -> Option<String> {
+    preferences::load().ui_language
+}
+
 fn config_dir() -> anyhow::Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("No se puede obtener el directorio de configuración")?
@@ -462,7 +470,11 @@ async fn get_recommendations_page(
             .await
             .map_err(|e| e.to_string())?;
         let lb = LetterboxdClient::new(&state.http, &token);
-        let tmdb = TmdbClient::new(&state.http, &config.tmdb_bearer_token);
+        let tmdb = TmdbClient::new(
+            &state.http,
+            &config.tmdb_bearer_token,
+            current_ui_lang().as_deref(),
+        );
 
         // Solo pasos 1-3 del pipeline: pre-score candidatos por
         // freq × TMDB. NO tocamos Letterboxd todavía — eso se
@@ -633,7 +645,7 @@ async fn get_movie_view(
     state: State<'_, AppState>,
 ) -> Result<Option<MovieView>, String> {
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
-    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let tmdb = TmdbClient::new(&state.http, &bearer, current_ui_lang().as_deref());
     let start = std::time::Instant::now();
     let out = tmdb
         .get_movie_view(tmdb_id)
@@ -656,7 +668,7 @@ async fn get_series_view(
     state: State<'_, AppState>,
 ) -> Result<Option<tmdb::SeriesDetails>, String> {
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
-    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let tmdb = TmdbClient::new(&state.http, &bearer, current_ui_lang().as_deref());
     let start = std::time::Instant::now();
     let out = tmdb
         .get_series_details(tmdb_id)
@@ -679,7 +691,7 @@ async fn get_series_season(
     state: State<'_, AppState>,
 ) -> Result<Vec<tmdb::SeriesEpisode>, String> {
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
-    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let tmdb = TmdbClient::new(&state.http, &bearer, current_ui_lang().as_deref());
     tmdb.get_season(tmdb_id, season)
         .await
         .map_err(|e| e.to_string())
@@ -718,7 +730,7 @@ async fn search_movies_tmdb(
     }
 
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
-    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let tmdb = TmdbClient::new(&state.http, &bearer, current_ui_lang().as_deref());
     // §7 audit series: `search_multi` mezcla movie + tv en el mismo
     // request (single-shot) y respeta el ranking de popularidad de
     // TMDB. Cada hit trae `kind` para que el frontend pinte badges
@@ -928,7 +940,7 @@ async fn search_torrents_by_tmdb(
     state: State<'_, AppState>,
 ) -> Result<TorrentSearchResult, String> {
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
-    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let tmdb = TmdbClient::new(&state.http, &bearer, current_ui_lang().as_deref());
     let details = tmdb.get_movie_details(tmdb_id).await.ok().flatten();
 
     // Fase 4a — cache check ANTES del sondeo a providers. Key
@@ -1137,7 +1149,7 @@ async fn search_torrents_series(
     state: State<'_, AppState>,
 ) -> Result<TorrentSearchResult, String> {
     let bearer = state.config.lock().await.tmdb_bearer_token.clone();
-    let tmdb = TmdbClient::new(&state.http, &bearer);
+    let tmdb = TmdbClient::new(&state.http, &bearer, current_ui_lang().as_deref());
     let details = tmdb
         .get_series_details(tmdb_id)
         .await
@@ -1951,7 +1963,49 @@ async fn get_preferences() -> Result<Preferences, String> {
 
 #[tauri::command]
 async fn set_preferences(prefs: Preferences) -> Result<(), String> {
-    preferences::save(&prefs).map_err(|e| e.to_string())
+    // Invalidación de caches TMDB al cambiar `ui_language`: los
+    // datos guardados (title, overview, genres) están en el idioma
+    // ANTERIOR — si el user acaba de pasar de es→fr veríamos las
+    // sinopsis en español hasta que expirara el TTL (24h). Como el
+    // trigger es raro (cambio manual) y los caches son cheap-to-
+    // rebuild, los borramos in-place antes de persistir la pref.
+    let prev = preferences::load();
+    let lang_changed = prev.ui_language != prefs.ui_language;
+    preferences::save(&prefs).map_err(|e| e.to_string())?;
+    if lang_changed {
+        for kind in ["tmdb_view", "tmdb_search", "tmdb_details", "tmdb_recs"] {
+            let _ = purge_cache_kind(kind);
+        }
+        // Series/season caches viven bajo nombres específicos —
+        // los borramos por path directo para no acoplar `clear_cache`
+        // a nuevas kinds.
+        if let Ok(dir) = config_dir() {
+            for f in ["tmdb_series_details_cache.json", "tmdb_season_cache.json"] {
+                let _ = std::fs::remove_file(dir.join(f));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Borra un cache tipo `"tmdb_search"`, `"tmdb_view"`, etc. Existe
+/// como helper aparte para poderlo llamar sin pasar por el comando
+/// Tauri `clear_cache` (que además invalida más cosas y hace lock
+/// del `AppState`).
+fn purge_cache_kind(kind: &str) -> anyhow::Result<()> {
+    let dir = config_dir()?;
+    let file = match kind {
+        "tmdb_view" => "tmdb_view_cache.json",
+        "tmdb_search" => "tmdb_search_cache.json",
+        "tmdb_details" => "tmdb_details_cache.json",
+        "tmdb_recs" => "tmdb_recs_cache.json",
+        _ => return Ok(()),
+    };
+    let path = dir.join(file);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 // ---------- Entry point ----------

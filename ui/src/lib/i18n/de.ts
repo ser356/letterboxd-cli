@@ -111,4 +111,41 @@ export const de: Record<string, string> = {
   'resume.at': 'Du warst bei {{time}}',
   'resume.resume': 'Fortsetzen',
   'resume.restart': 'Von vorn beginnen',
+  'resume.eyebrow': 'Du hast schon einen Teil gesehen',
+  'resume.question': 'An der letzten Stelle fortsetzen?',
+  'resume.progress': 'Gespeicherter Fortschritt',
+  'resume.jumpTo': 'Zu {{time}} springen',
+  'resume.ignorePrevious': 'Vorherigen Fortschritt ignorieren',
+  'resume.confirm': 'bestätigen',
+
+  // ── Home / Recs ───────────────────────────────────────
+  'home.headline': 'Was schauen wir heute?',
+  'home.subhead': 'Wähle eine Option oder drücke Enter auf der hervorgehobenen.',
+  'home.sessionActive': 'Sitzung aktiv',
+  'home.up': 'Hoch',
+  'home.down': 'Runter',
+  'home.select': 'Auswählen',
+  'home.optionRecsLabel': 'Empfehlungen aus Letterboxd',
+  'home.optionRecsHint': 'Filme auf Basis deiner Historie generieren und durchsuchen.',
+  'home.optionSearchLabel': 'Torrents direkt suchen',
+  'home.optionSearchHint': 'Titel eingeben und Torrents ohne Letterboxd suchen.',
+
+  // ── HotkeyBar tooltip ────────────────────────────────
+  'hotkey.shortcutTitle': 'Kurzbefehl: {{key}}',
+
+  // ── StreamPanel ──────────────────────────────────────
+  'streamPanel.streaming': 'Wiedergabe',
+  'streamPanel.stop': 'Stopp',
+  'streamPanel.hintPre': 'Drücke',
+  'streamPanel.hintMid': 'um den ausgewählten Torrent abzuspielen. Untertitel werden im Player gewählt.',
+  'streamPanel.hintPost': 'sendet den Magnet an deinen Standard-BitTorrent-Client.',
+
+  // ── Login extras ─────────────────────────────────────
+  'login.title': 'Anmelden',
+  'login.username': 'Benutzername',
+  'login.password': 'Passwort',
+  'login.submit': 'Anmelden',
+  'login.hint': 'Zugangsdaten bleiben lokal; sie verlassen deinen Rechner nie.',
+  'login.onlyDesktop': 'Dieses Fenster funktioniert nur in der Desktop-App.',
+  'login.verifying': 'Überprüfe…',
 }

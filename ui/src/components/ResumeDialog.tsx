@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Diálogo estilo Stremio: "Vimos que dejaste esta peli a la mitad,
@@ -26,6 +27,7 @@ export function ResumeDialog({
   onRestart: () => void
   onClose: () => void
 }) {
+  const t = useT()
   const [focus, setFocus] = useState<'resume' | 'restart'>('resume')
 
   const confirm = () => {
@@ -55,7 +57,7 @@ export function ResumeDialog({
       onClick={onClose}
       className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/70 backdrop-blur-sm"
       role="dialog"
-      aria-label="Reanudar reproducción"
+      aria-label={t('resume.title')}
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -63,13 +65,13 @@ export function ResumeDialog({
       >
         <header>
           <p className="text-[11px] uppercase tracking-wide text-dim">
-            Ya viste parte de esta peli
+            {t('resume.eyebrow')}
           </p>
           <h2 className="mt-1 text-[18px] font-semibold text-ink">
-            ¿Reanudar donde lo dejaste?
+            {t('resume.question')}
           </h2>
           <p className="mt-2 text-[12px] text-muted">
-            Progreso guardado:{' '}
+            {t('resume.progress')}:{' '}
             <span className="text-body">{stamp}</span>{' '}
             <span className="text-dim">({pct}%)</span>
           </p>
@@ -86,10 +88,10 @@ export function ResumeDialog({
             }`}
           >
             <span className="text-[14px] font-semibold text-accent">
-              Reanudar
+              {t('resume.resume')}
             </span>
             <span className="text-[11px] text-muted">
-              Salta a {stamp}
+              {t('resume.jumpTo', { time: stamp })}
             </span>
           </button>
 
@@ -103,10 +105,10 @@ export function ResumeDialog({
             }`}
           >
             <span className="text-[14px] font-semibold text-ink">
-              Empezar de cero
+              {t('resume.restart')}
             </span>
             <span className="text-[11px] text-muted">
-              Ignorar el progreso anterior
+              {t('resume.ignorePrevious')}
             </span>
           </button>
         </div>
@@ -115,15 +117,15 @@ export function ResumeDialog({
           <kbd className="rounded-sm border border-hairline bg-surface px-1.5 py-0.5 text-[11px] text-body">
             ← / →
           </kbd>{' '}
-          mover ·{' '}
+          {t('hotkey.move').toLowerCase()} ·{' '}
           <kbd className="rounded-sm border border-hairline bg-surface px-1.5 py-0.5 text-[11px] text-body">
             ⏎
           </kbd>{' '}
-          confirmar ·{' '}
+          {t('resume.confirm')} ·{' '}
           <kbd className="rounded-sm border border-hairline bg-surface px-1.5 py-0.5 text-[11px] text-body">
             Esc
           </kbd>{' '}
-          cancelar
+          {t('common.cancel').toLowerCase()}
         </footer>
       </div>
     </div>

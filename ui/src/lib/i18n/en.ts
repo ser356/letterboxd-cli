@@ -144,4 +144,37 @@ export const en: Record<string, string> = {
   'home.dismiss': 'Do not suggest',
   'home.dismissedTitle': 'Dismissed suggestions',
   'home.restore': 'Restore',
+  'home.headline': 'What are we watching today?',
+  'home.subhead': 'Pick one of the options or press Enter on the highlighted one.',
+  'home.sessionActive': 'Session active',
+  'home.up': 'Up',
+  'home.down': 'Down',
+  'home.select': 'Select',
+  'home.optionRecsLabel': 'Recommendations from Letterboxd',
+  'home.optionRecsHint': 'Generate and browse suggested films based on your history.',
+  'home.optionSearchLabel': 'Search torrents directly',
+  'home.optionSearchHint': 'Type a title and search torrents without going through Letterboxd.',
+
+  // ── HotkeyBar tooltip ────────────────────────────────
+  'hotkey.shortcutTitle': 'Shortcut: {{key}}',
+
+  // ── StreamPanel ──────────────────────────────────────
+  'streamPanel.streaming': 'Streaming',
+  'streamPanel.stop': 'Stop',
+  'streamPanel.hintPre': 'Press',
+  'streamPanel.hintMid': 'to play the selected torrent. Subtitles are chosen from the player itself.',
+  'streamPanel.hintPost': 'sends the magnet to your default BitTorrent client.',
+
+  // ── Login extra ──────────────────────────────────────
+  'login.hint': 'Credentials stay local; they never leave your machine.',
+  'login.onlyDesktop': 'This window only works inside the desktop app.',
+  'login.verifying': 'Verifying…',
+
+  // ── Resume extras ────────────────────────────────────
+  'resume.eyebrow': 'You already watched part of this',
+  'resume.question': 'Resume where you left off?',
+  'resume.progress': 'Saved progress',
+  'resume.jumpTo': 'Jump to {{time}}',
+  'resume.ignorePrevious': 'Ignore previous progress',
+  'resume.confirm': 'confirm',
 }

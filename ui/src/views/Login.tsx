@@ -4,6 +4,7 @@ import { HotkeyBar } from '../components/HotkeyBar'
 import { TopNav } from '../components/TopNav'
 import { isTauri, login } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Login. `grant_type=password` contra la API de Letterboxd (reusa
@@ -13,6 +14,7 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  */
 export function Login() {
   const nav = useNavigate()
+  const t = useT()
   const [params] = useSearchParams()
   const next = params.get('next') ?? '/recs'
   const [busy, setBusy] = useState(false)
@@ -26,11 +28,11 @@ export function Login() {
   const hotkeys: Hotkey[] = [
     {
       key: 'Escape',
-      hint: 'volver',
+      hint: t('common.back'),
       run: () => nav('/'),
       ignoreInInput: false,
     },
-    { key: 'Enter', hint: 'entrar', run: submitForm, ignoreInInput: false },
+    { key: 'Enter', hint: t('login.submit'), run: submitForm, ignoreInInput: false },
   ]
   useHotkeys(hotkeys, [])
 
@@ -40,10 +42,10 @@ export function Login() {
 
       <main className="mx-auto flex w-full max-w-[440px] flex-1 flex-col justify-center px-8">
         <h1 className="text-[24px] font-semibold text-ink">
-          Inicia sesión en Letterboxd
+          {t('login.title')}
         </h1>
         <p className="mt-2 text-[14px] leading-relaxed text-muted">
-          Se guardan solo en local; nunca salen de tu máquina.
+          {t('login.hint')}
         </p>
 
         <form
@@ -51,7 +53,7 @@ export function Login() {
           onSubmit={async (e) => {
             e.preventDefault()
             if (!isTauri()) {
-              setError('Esta ventana solo funciona dentro de la app de escritorio.')
+              setError(t('login.onlyDesktop'))
               return
             }
             setBusy(true)
@@ -72,7 +74,7 @@ export function Login() {
           className="mt-8 flex flex-col gap-3"
         >
           <label className="flex flex-col gap-1.5 text-[12px] font-medium uppercase tracking-wide text-dim">
-            Usuario
+            {t('login.username')}
             <input
               name="username"
               autoComplete="username"
@@ -83,7 +85,7 @@ export function Login() {
           </label>
 
           <label className="flex flex-col gap-1.5 text-[12px] font-medium uppercase tracking-wide text-dim">
-            Contraseña
+            {t('login.password')}
             <input
               name="password"
               type="password"
@@ -107,7 +109,7 @@ export function Login() {
             disabled={busy}
             className="focus-ring mt-2 h-11 rounded-full bg-accent text-[15px] font-semibold text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {busy ? 'Verificando…' : 'Entrar'}
+            {busy ? t('login.verifying') : t('login.submit')}
           </button>
         </form>
       </main>

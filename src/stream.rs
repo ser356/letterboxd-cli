@@ -1408,6 +1408,55 @@ async fn warmup_librqbit_for_offset(state: &AppState, start_seconds: f64) {
     // avanzase sin que el usuario reprodujese realmente ese offset.
 }
 
+// ── helpers para elegir codec/bitrate de audio en spawn_hls ───
+
+/// Devuelve `(channels, codec)` del stream de audio que ffmpeg va
+/// a mapear en `spawn_hls` (`audio_idx` explícito o el primero por
+/// defecto). Consulta `cached_probe`; si no hay probe cacheado
+/// devuelve `(None, None)`.
+///
+/// Se usa para elegir bitrate AAC y — en el futuro — decidir
+/// `-c:a copy` cuando la fuente ya es AAC/MP3 (audit §3).
+///
+/// `audio_idx` es el índice contando SÓLO streams de audio (igual
+/// que el argv `-map 0:a:<n>`).
+#[cfg(feature = "gui")]
+async fn probe_selected_audio(
+    state: &AppState,
+    audio_idx: Option<usize>,
+) -> (Option<u32>, Option<String>) {
+    let guard = state.cached_probe.lock().await;
+    let Some(info) = guard.as_ref() else {
+        return (None, None);
+    };
+    let mut audios = info
+        .streams
+        .iter()
+        .filter(|s| s.kind == crate::ffmpeg::StreamKind::Audio);
+    let target = match audio_idx {
+        Some(n) => audios.nth(n),
+        None => audios.next(),
+    };
+    match target {
+        Some(a) => (a.channels, Some(a.codec.clone())),
+        None => (None, None),
+    }
+}
+
+/// Bitrate AAC transparente-perceptual escalado por canales.
+/// `≤2ch` o desconocido → 256k. `3-6ch` (5.1) → 384k. `7+ch`
+/// (7.1+) → 512k. AAC LC a ~64k/canal es transparente para
+/// material típico. Sin canales conocidos, 256k es el suelo seguro
+/// (nunca peor que el 192k anterior). Audit §5.
+#[cfg(feature = "gui")]
+fn aac_bitrate_for_channels(channels: Option<u32>) -> &'static str {
+    match channels {
+        Some(n) if n >= 7 => "512k",
+        Some(n) if n >= 3 => "384k",
+        _ => "256k",
+    }
+}
+
 /// Spawnea un ffmpeg que producirá `seg-<idx>.ts`, `seg-<idx+1>.ts`,
 /// … en `dir` (tempdir compartido). Argv clave:
 ///
@@ -1496,12 +1545,18 @@ async fn spawn_hls(
     // Video: siempre transcode a H.264 8-bit High single-slice. HLS
     // TS segments no soportan HEVC en Safari <14 y añade complejidad;
     // libx264 veryfast es suficiente para 1080p en cualquier M-series.
+    //
+    // CRF 18 (transparent-ish) en vez de 23: en CRF el coste de CPU
+    // es prácticamente el mismo, lo que cambia es el bitrate de
+    // salida (⇒ más disco). El audit §5 lo justifica como
+    // "presupuesto de calidad alto" para lo que inevitablemente hay
+    // que recodificar; el resto va por copy (rama futura §2).
     cmd.arg("-c:v")
         .arg("libx264")
         .arg("-preset")
         .arg("veryfast")
         .arg("-crf")
-        .arg("23")
+        .arg("18")
         .arg("-profile:v")
         .arg("high")
         .arg("-level:v")
@@ -1523,15 +1578,23 @@ async fn spawn_hls(
         // el tiempo absoluto en el mux de salida.
         .arg("-avoid_negative_ts")
         .arg("make_zero");
-    // Audio: siempre AAC 192k (TS puede llevar AAC ADTS, muy compatible).
-    // Aunque el input ya sea AAC, remuxar TS con `-c:a copy` a veces
-    // da bitstream errors por packet alignment.
-    cmd.arg("-c:a")
-        .arg("aac")
-        .arg("-b:a")
-        .arg("192k")
-        .arg("-ac")
-        .arg("2");
+    // Audio: AAC con bitrate escalado por canales, SIN forzar
+    // downmix. Audit §5: mantener layout multicanal cuando el
+    // origen es 5.1 → el WebView / dispositivo de salida hará el
+    // downmix a estéreo si toca. Bitrates elegidos para
+    // transparencia perceptual (~64k/canal AAC LC):
+    //   * ≤2ch o desconocido: 256k
+    //   * 3-6ch (5.1):        384k
+    //   * 7+ch (7.1):         512k
+    let (audio_channels, in_audio_codec) = probe_selected_audio(state, audio_idx).await;
+    let aac_bitrate = aac_bitrate_for_channels(audio_channels);
+    if std::env::var("VIDEODROME_DEBUG").is_ok() {
+        eprintln!(
+            "[hls] audio: src_codec={:?} src_channels={:?} → aac {}",
+            in_audio_codec, audio_channels, aac_bitrate
+        );
+    }
+    cmd.arg("-c:a").arg("aac").arg("-b:a").arg(aac_bitrate);
     // Sin subs, sin data.
     cmd.arg("-sn").arg("-dn");
     // HLS output. `temp_file` es crítico para que solo veamos .ts

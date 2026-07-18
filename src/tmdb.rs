@@ -237,6 +237,14 @@ where
 pub struct TmdbClient<'a> {
     http: &'a reqwest::Client,
     bearer_token: &'a str,
+    /// Código BCP47 que se pasa como `language=` en cada request
+    /// para que TMDB devuelva `title`, `overview`, `genres` y
+    /// `translations` en el idioma de la UI. Se pobla desde
+    /// `Preferences.ui_language` (mapeado ISO 639-1 → BCP47 con
+    /// `bcp47_locale`). Excepciones: los endpoints que necesitan
+    /// EN por razones de matching de releases scene mantienen
+    /// `en-US` hardcodeado — están documentados in-line.
+    locale: String,
     cache: Mutex<HashMap<u64, CachedRecs>>,
     /// Cache de `/search/movie` — clave: query normalizada
     /// (`trim().to_lowercase()`), valor: lista de hits + timestamp.
@@ -266,11 +274,39 @@ pub struct TmdbClient<'a> {
     season_cache: Mutex<HashMap<String, Timestamped<Vec<SeriesEpisode>>>>,
 }
 
+/// Mapea un código ISO 639-1 (o BCP47 ya normalizado) a un locale
+/// BCP47 aceptado por TMDB. `""`, `None` o codigos desconocidos
+/// devuelven `"en-US"` (por defecto neutro para el catálogo).
+///
+/// TMDB acepta cualquier locale BCP47 pero solo los "principales"
+/// están traducidos completamente (title, overview, genres). Los
+/// menos comunes cae al inglés silenciosamente — no rompe la app.
+pub fn bcp47_locale(ui_lang: Option<&str>) -> String {
+    let raw = ui_lang.unwrap_or("").trim().to_lowercase();
+    // Ya está en formato BCP47 (contiene guion): úsalo tal cual.
+    if raw.contains('-') && raw.len() >= 5 {
+        return raw;
+    }
+    match raw.as_str() {
+        "es" => "es-ES".to_string(),
+        "en" => "en-US".to_string(),
+        "fr" => "fr-FR".to_string(),
+        "de" => "de-DE".to_string(),
+        "it" => "it-IT".to_string(),
+        "pt" => "pt-PT".to_string(),
+        _ => "en-US".to_string(),
+    }
+}
+
 impl<'a> TmdbClient<'a> {
-    pub fn new(http: &'a reqwest::Client, bearer_token: &'a str) -> Self {
+    /// Constructor con locale explícito. Los formatos aceptados son
+    /// ISO 639-1 (`"es"`, `"en"`…) o BCP47 (`"es-ES"`). Ver
+    /// `bcp47_locale` para el mapeo.
+    pub fn new(http: &'a reqwest::Client, bearer_token: &'a str, ui_lang: Option<&str>) -> Self {
         Self {
             http,
             bearer_token,
+            locale: bcp47_locale(ui_lang),
             cache: Mutex::new(load_cache()),
             #[cfg(feature = "gui")]
             search_cache: Mutex::new(load_generic(SEARCH_CACHE_FILE)),
@@ -294,7 +330,10 @@ impl<'a> TmdbClient<'a> {
             }
         }
 
-        let url = format!("{BASE_URL}/movie/{tmdb_id}/recommendations?language=es-ES&page=1");
+        let url = format!(
+            "{BASE_URL}/movie/{tmdb_id}/recommendations?language={loc}&page=1",
+            loc = self.locale,
+        );
 
         let resp = self
             .http
@@ -483,9 +522,11 @@ impl<'a> TmdbClient<'a> {
     #[cfg(feature = "gui")]
     async fn search_movies_by_title(&self, query: &str) -> Result<Vec<TmdbMovie>> {
         let key = query.trim().to_lowercase();
+        let encoded = urlencoding::encode(query);
         let url = format!(
-            "{BASE_URL}/search/movie?query={}&language=es-ES&include_adult=true&page=1",
-            urlencoding::encode(query)
+            "{BASE_URL}/search/movie?query={q}&language={loc}&include_adult=true&page=1",
+            q = encoded,
+            loc = self.locale,
         );
         let resp_result = self
             .http
@@ -575,9 +616,11 @@ impl<'a> TmdbClient<'a> {
             popularity: f32,
         }
 
+        let encoded = urlencoding::encode(query);
         let url = format!(
-            "{BASE_URL}/search/person?query={}&language=es-ES&include_adult=true&page=1",
-            urlencoding::encode(query)
+            "{BASE_URL}/search/person?query={q}&language={loc}&include_adult=true&page=1",
+            q = encoded,
+            loc = self.locale,
         );
         let resp = self
             .http
@@ -635,8 +678,9 @@ impl<'a> TmdbClient<'a> {
         }
 
         let credits_url = format!(
-            "{BASE_URL}/person/{}/movie_credits?language=es-ES",
-            person.id
+            "{BASE_URL}/person/{pid}/movie_credits?language={loc}",
+            pid = person.id,
+            loc = self.locale,
         );
         let credits_resp = self
             .http
@@ -994,7 +1038,10 @@ impl<'a> TmdbClient<'a> {
             name: String,
         }
 
-        let url = format!("{BASE_URL}/movie/{tmdb_id}?language=es-ES");
+        let url = format!(
+            "{BASE_URL}/movie/{tmdb_id}?language={loc}",
+            loc = self.locale,
+        );
         // Timeout específico corto (4s). El HTTP client global tiene
         // 20s, demasiado para el modal — el user prefiere ver "sin
         // sinopsis" al instante que un spinner colgado. Si TMDB
@@ -1095,9 +1142,11 @@ impl<'a> TmdbClient<'a> {
         if q.is_empty() {
             return Ok(Vec::new());
         }
+        let encoded = urlencoding::encode(q);
         let url = format!(
-            "{BASE_URL}/search/multi?query={}&language=es-ES&include_adult=true&page=1",
-            urlencoding::encode(q)
+            "{BASE_URL}/search/multi?query={query}&language={loc}&include_adult=true&page=1",
+            query = encoded,
+            loc = self.locale,
         );
         let resp = self
             .http
@@ -1236,7 +1285,10 @@ impl<'a> TmdbClient<'a> {
             imdb_id: Option<String>,
         }
 
-        let url = format!("{BASE_URL}/tv/{tmdb_id}?append_to_response=external_ids&language=es-ES");
+        let url = format!(
+            "{BASE_URL}/tv/{tmdb_id}?append_to_response=external_ids&language={loc}",
+            loc = self.locale,
+        );
         let resp = self
             .http
             .get(&url)
@@ -1330,7 +1382,10 @@ impl<'a> TmdbClient<'a> {
             runtime: Option<u32>,
         }
 
-        let url = format!("{BASE_URL}/tv/{tmdb_id}/season/{season}?language=es-ES");
+        let url = format!(
+            "{BASE_URL}/tv/{tmdb_id}/season/{season}?language={loc}",
+            loc = self.locale,
+        );
         let resp = self
             .http
             .get(&url)

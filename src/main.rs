@@ -230,7 +230,7 @@ async fn dispatch(command: Commands) -> Result<()> {
             let token = auth::get_access_token(&http, &config).await?;
 
             let lb = LetterboxdClient::new(&http, &token);
-            let tmdb = TmdbClient::new(&http, &config.tmdb_bearer_token);
+            let tmdb = TmdbClient::new(&http, &config.tmdb_bearer_token, None);
 
             let recs =
                 build_recommendations(&lb, &tmdb, count, min_rating, &CliProgress::new()).await?;
@@ -439,7 +439,7 @@ async fn dispatch(command: Commands) -> Result<()> {
                         "Se ha pasado --imdb sin título, pero TMDB_BEARER_TOKEN \
                          no está configurado (necesario para resolver IMDb → título).",
                     )?;
-                    let tmdb = TmdbClient::new(&http, &bearer);
+                    let tmdb = TmdbClient::new(&http, &bearer, None);
                     match tmdb.find_by_imdb(id).await? {
                         Some(lookup) => {
                             if !json {

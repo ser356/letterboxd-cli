@@ -142,4 +142,37 @@ export const es: Record<string, string> = {
   'home.dismiss': 'No sugerir',
   'home.dismissedTitle': 'Sugerencias descartadas',
   'home.restore': 'Restaurar',
+  'home.headline': '¿Qué hacemos hoy?',
+  'home.subhead': 'Elige una de las opciones o pulsa Enter sobre la resaltada.',
+  'home.sessionActive': 'Sesión activa',
+  'home.up': 'Subir',
+  'home.down': 'Bajar',
+  'home.select': 'Seleccionar',
+  'home.optionRecsLabel': 'Recomendaciones desde Letterboxd',
+  'home.optionRecsHint': 'Genera y navega por películas recomendadas basadas en tu historial.',
+  'home.optionSearchLabel': 'Buscar torrents directamente',
+  'home.optionSearchHint': 'Escribe un título y busca torrents sin pasar por Letterboxd.',
+
+  // ── HotkeyBar tooltip ────────────────────────────────
+  'hotkey.shortcutTitle': 'Atajo: {{key}}',
+
+  // ── StreamPanel ──────────────────────────────────────
+  'streamPanel.streaming': 'Streaming',
+  'streamPanel.stop': 'Detener',
+  'streamPanel.hintPre': 'Pulsa',
+  'streamPanel.hintMid': 'para proyectar el torrent seleccionado. Los subtítulos se eligen desde el propio reproductor.',
+  'streamPanel.hintPost': 'envía el magnet a tu cliente BitTorrent por defecto.',
+
+  // ── Login extras ─────────────────────────────────────
+  'login.hint': 'Las credenciales se guardan solo en local; nunca salen de tu máquina.',
+  'login.onlyDesktop': 'Esta ventana solo funciona dentro de la app de escritorio.',
+  'login.verifying': 'Verificando…',
+
+  // ── Resume extras ────────────────────────────────────
+  'resume.eyebrow': 'Ya viste parte de esta peli',
+  'resume.question': '¿Reanudar donde lo dejaste?',
+  'resume.progress': 'Progreso guardado',
+  'resume.jumpTo': 'Salta a {{time}}',
+  'resume.ignorePrevious': 'Ignorar el progreso anterior',
+  'resume.confirm': 'confirmar',
 }

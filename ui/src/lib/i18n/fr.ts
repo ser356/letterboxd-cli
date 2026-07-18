@@ -112,4 +112,41 @@ export const fr: Record<string, string> = {
   'resume.at': 'Vous étiez à {{time}}',
   'resume.resume': 'Reprendre',
   'resume.restart': 'Recommencer',
+  'resume.eyebrow': 'Vous en avez déjà vu une partie',
+  'resume.question': 'Reprendre où vous vous êtes arrêté ?',
+  'resume.progress': 'Progression enregistrée',
+  'resume.jumpTo': 'Aller à {{time}}',
+  'resume.ignorePrevious': 'Ignorer la progression précédente',
+  'resume.confirm': 'confirmer',
+
+  // ── Home / Recs ───────────────────────────────────────
+  'home.headline': 'Qu’est-ce qu’on regarde aujourd’hui ?',
+  'home.subhead': 'Choisissez une option ou appuyez sur Entrée sur celle en surbrillance.',
+  'home.sessionActive': 'Session active',
+  'home.up': 'Haut',
+  'home.down': 'Bas',
+  'home.select': 'Sélectionner',
+  'home.optionRecsLabel': 'Recommandations depuis Letterboxd',
+  'home.optionRecsHint': 'Générer et parcourir des films recommandés basés sur votre historique.',
+  'home.optionSearchLabel': 'Rechercher des torrents directement',
+  'home.optionSearchHint': 'Tapez un titre et cherchez des torrents sans passer par Letterboxd.',
+
+  // ── HotkeyBar tooltip ────────────────────────────────
+  'hotkey.shortcutTitle': 'Raccourci : {{key}}',
+
+  // ── StreamPanel ──────────────────────────────────────
+  'streamPanel.streaming': 'Lecture',
+  'streamPanel.stop': 'Arrêter',
+  'streamPanel.hintPre': 'Appuyez sur',
+  'streamPanel.hintMid': 'pour lire le torrent sélectionné. Les sous-titres se choisissent dans le lecteur.',
+  'streamPanel.hintPost': 'envoie le magnet à votre client BitTorrent par défaut.',
+
+  // ── Login extras ─────────────────────────────────────
+  'login.title': 'Se connecter',
+  'login.username': 'Utilisateur',
+  'login.password': 'Mot de passe',
+  'login.submit': 'Se connecter',
+  'login.hint': 'Les identifiants restent en local ; ils ne quittent jamais votre machine.',
+  'login.onlyDesktop': 'Cette fenêtre ne fonctionne que dans l’app de bureau.',
+  'login.verifying': 'Vérification…',
 }

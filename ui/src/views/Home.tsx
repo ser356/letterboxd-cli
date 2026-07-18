@@ -5,6 +5,7 @@ import { HotkeyBar } from '../components/HotkeyBar'
 import { TopNav } from '../components/TopNav'
 import { hasSession, isTauri } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Menu principal, equivalente al enum `View::Menu` de la TUI: dos
@@ -12,18 +13,18 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  * Enter. Si no hay sesión de Letterboxd, "Recomendaciones" redirige a
  * /login antes.
  */
-const OPTIONS = [
+const OPTION_KEYS = [
   {
     key: 'recs',
-    label: 'Recomendaciones desde Letterboxd',
-    hint: 'Genera y navega por películas recomendadas basadas en tu historial.',
+    labelKey: 'home.optionRecsLabel',
+    hintKey: 'home.optionRecsHint',
     path: '/recs',
     needsSession: true,
   },
   {
     key: 'search',
-    label: 'Buscar torrents directamente',
-    hint: 'Escribe un título y busca torrents sin pasar por Letterboxd.',
+    labelKey: 'home.optionSearchLabel',
+    hintKey: 'home.optionSearchHint',
     path: '/search',
     needsSession: false,
   },
@@ -31,6 +32,7 @@ const OPTIONS = [
 
 export function Home() {
   const nav = useNavigate()
+  const t = useT()
   const [i, setI] = useState(0)
   const [loggedIn, setLoggedIn] = useState<boolean | null>(null)
 
@@ -42,7 +44,7 @@ export function Home() {
     hasSession().then(setLoggedIn).catch(() => setLoggedIn(false))
   }, [])
 
-  const go = (opt: (typeof OPTIONS)[number]) => {
+  const go = (opt: (typeof OPTION_KEYS)[number]) => {
     if (opt.needsSession && loggedIn === false) {
       nav('/login?next=' + encodeURIComponent(opt.path))
       return
@@ -51,18 +53,18 @@ export function Home() {
   }
 
   const hotkeys: Hotkey[] = [
-    { key: 'j', hint: 'bajar', run: () => setI((x) => Math.min(x + 1, OPTIONS.length - 1)) },
-    { key: 'ArrowDown', hint: '', run: () => setI((x) => Math.min(x + 1, OPTIONS.length - 1)) },
-    { key: 'k', hint: 'subir', run: () => setI((x) => Math.max(x - 1, 0)) },
+    { key: 'j', hint: t('home.down'), run: () => setI((x) => Math.min(x + 1, OPTION_KEYS.length - 1)) },
+    { key: 'ArrowDown', hint: '', run: () => setI((x) => Math.min(x + 1, OPTION_KEYS.length - 1)) },
+    { key: 'k', hint: t('home.up'), run: () => setI((x) => Math.max(x - 1, 0)) },
     { key: 'ArrowUp', hint: '', run: () => setI((x) => Math.max(x - 1, 0)) },
-    { key: 'Enter', hint: 'seleccionar', run: () => go(OPTIONS[i]) },
-    { key: ',', hint: 'Ajustes', run: () => nav('/settings') },
+    { key: 'Enter', hint: t('home.select'), run: () => go(OPTION_KEYS[i]) },
+    { key: ',', hint: t('nav.settings'), run: () => nav('/settings') },
   ]
   useHotkeys(hotkeys, [i, loggedIn])
 
   const barKeys: Hotkey[] = [
-    { key: 'j', hint: 'Mover', run: () => {} },
-    { key: 'Enter', hint: 'seleccionar', run: () => {} },
+    { key: 'j', hint: t('hotkey.move'), run: () => {} },
+    { key: 'Enter', hint: t('home.select'), run: () => {} },
   ]
 
   return (
@@ -70,35 +72,35 @@ export function Home() {
       <TopNav>
         {loggedIn ? (
           <span className="rounded-full px-3 py-1 text-[13px] text-muted">
-            Sesión activa
+            {t('home.sessionActive')}
           </span>
         ) : (
           <button
             onClick={() => nav('/login')}
             className="focus-ring glass rounded-full px-4 py-1.5 text-[13px] text-ink transition-transform hover:scale-[1.02]"
           >
-            Iniciar sesión
+            {t('login.title')}
           </button>
         )}
         <button
           onClick={() => nav('/settings')}
           className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-[13px] text-body hover:border-border-strong"
-          title="Ajustes (,)"
+          title={`${t('nav.settings')} (,)`}
         >
-          Ajustes
+          {t('nav.settings')}
         </button>
       </TopNav>
 
       <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col justify-center px-8">
         <h1 className="mb-2 text-[32px] font-semibold leading-tight tracking-tight text-ink">
-          ¿Qué hacemos hoy?
+          {t('home.headline')}
         </h1>
         <p className="mb-10 text-[15px] text-muted">
-          Elige una de las dos opciones o pulsa Enter sobre la resaltada.
+          {t('home.subhead')}
         </p>
 
         <ul className="flex flex-col gap-2">
-          {OPTIONS.map((opt, idx) => {
+          {OPTION_KEYS.map((opt, idx) => {
             const active = idx === i
             return (
               <li key={opt.key}>
@@ -113,19 +115,19 @@ export function Home() {
                 >
                   <div className="flex items-baseline justify-between gap-4">
                     <span className="text-[16px] font-medium text-ink">
-                      {opt.label}
+                      {t(opt.labelKey)}
                     </span>
                     {active && (
                       <span
                         className="flex h-6 w-6 items-center justify-center text-accent"
-                        aria-label="Pulsa Enter"
+                        aria-label="Enter"
                         title="Enter"
                       >
                         <KeyReturn size={18} weight="bold" />
                       </span>
                     )}
                   </div>
-                  <p className="mt-1 text-[13px] text-muted">{opt.hint}</p>
+                  <p className="mt-1 text-[13px] text-muted">{t(opt.hintKey)}</p>
                 </button>
               </li>
             )

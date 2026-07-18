@@ -5,6 +5,7 @@ import {
   type StreamInfo,
   type StreamStats,
 } from '../lib/api'
+import { useT } from '../lib/i18n'
 
 /**
  * Panel inferior de la vista Torrents. Dos modos:
@@ -35,6 +36,7 @@ export function StreamPanel({
   onStopStream: () => void
   onPlayerDied: () => void
 }) {
+  const t = useT()
   const [stats, setStats] = useState<StreamStats | null>(null)
 
   useEffect(() => {
@@ -94,7 +96,7 @@ export function StreamPanel({
         <div className="mb-2 flex items-baseline justify-between">
           <div>
             <span className="text-[13px] font-medium text-ink">
-              ▶ Streaming
+              ▶ {t('streamPanel.streaming')}
             </span>{' '}
             <span className="text-[13px] text-body">{stream.file_name}</span>
           </div>
@@ -102,7 +104,7 @@ export function StreamPanel({
             onClick={onStopStream}
             className="focus-ring rounded-full border border-hairline px-3 py-1 text-[12px] text-body hover:border-border-strong"
           >
-            Detener
+            {t('streamPanel.stop')}
           </button>
         </div>
 
@@ -143,10 +145,8 @@ export function StreamPanel({
         <p className="text-body">{message}</p>
       ) : (
         <p className="text-body">
-          Pulsa <Kbd>Enter</Kbd> para proyectar el torrent seleccionado.
-          Los subtítulos se eligen desde el propio reproductor.{' '}
-          <Kbd>S</Kbd> envía el magnet a tu cliente BitTorrent por
-          defecto.
+          {t('streamPanel.hintPre')} <Kbd>Enter</Kbd> {t('streamPanel.hintMid')}{' '}
+          <Kbd>S</Kbd> {t('streamPanel.hintPost')}
         </p>
       )}
     </div>

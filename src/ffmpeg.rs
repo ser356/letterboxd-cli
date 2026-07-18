@@ -181,6 +181,11 @@ pub struct StreamInfo {
     /// solo lo reporta por aquí.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Solo para audio: número de canales (1=mono, 2=stereo, 6=5.1,
+    /// 8=7.1). Se usa en `spawn_hls` para elegir bitrate AAC sin
+    /// forzar downmix a estéreo (preservación de multicanal).
+    #[serde(default)]
+    pub channels: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +255,8 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
         #[serde(default)]
         profile: Option<String>,
         #[serde(default)]
+        channels: Option<u32>,
+        #[serde(default)]
         tags: Option<Tags>,
     }
     #[derive(Deserialize)]
@@ -291,6 +298,7 @@ pub async fn probe(url: &str) -> Result<MediaInfo> {
                 height: s.height,
                 pix_fmt: s.pix_fmt,
                 profile: s.profile,
+                channels: s.channels,
             }
         })
         .collect();

@@ -1,4 +1,5 @@
 import type { Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Sticky bottom bar with the active hotkey hints. Each entry shows an
@@ -6,13 +7,14 @@ import type { Hotkey } from '../lib/hotkeys'
  * for hover tooltip, not as a visible keycap.
  */
 export function HotkeyBar({ hotkeys }: { hotkeys: Hotkey[] }) {
+  const t = useT()
   return (
     <div className="glass sticky bottom-0 z-30 rounded-none">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-6 gap-y-1 px-8 py-2.5 text-[13px] text-body">
         {hotkeys.map((hk) => (
           <span
             key={hk.key + hk.hint}
-            title={`Atajo: ${formatKey(hk.key)}`}
+            title={t('hotkey.shortcutTitle', { key: formatKey(hk.key) })}
             className="inline-flex items-center gap-2"
           >
             <span className="flex h-5 w-5 items-center justify-center text-accent">

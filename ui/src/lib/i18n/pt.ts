@@ -111,4 +111,41 @@ export const pt: Record<string, string> = {
   'resume.at': 'Estavas em {{time}}',
   'resume.resume': 'Retomar',
   'resume.restart': 'Recomeçar',
+  'resume.eyebrow': 'Já viste parte disto',
+  'resume.question': 'Retomar onde ficaste?',
+  'resume.progress': 'Progresso guardado',
+  'resume.jumpTo': 'Ir para {{time}}',
+  'resume.ignorePrevious': 'Ignorar o progresso anterior',
+  'resume.confirm': 'confirmar',
+
+  // ── Home / Recs ───────────────────────────────────────
+  'home.headline': 'O que vemos hoje?',
+  'home.subhead': 'Escolhe uma opção ou pressiona Enter na realçada.',
+  'home.sessionActive': 'Sessão ativa',
+  'home.up': 'Cima',
+  'home.down': 'Baixo',
+  'home.select': 'Selecionar',
+  'home.optionRecsLabel': 'Recomendações do Letterboxd',
+  'home.optionRecsHint': 'Gera e navega por filmes recomendados com base no teu histórico.',
+  'home.optionSearchLabel': 'Pesquisar torrents diretamente',
+  'home.optionSearchHint': 'Escreve um título e pesquisa torrents sem passar pelo Letterboxd.',
+
+  // ── HotkeyBar tooltip ────────────────────────────────
+  'hotkey.shortcutTitle': 'Atalho: {{key}}',
+
+  // ── StreamPanel ──────────────────────────────────────
+  'streamPanel.streaming': 'A reproduzir',
+  'streamPanel.stop': 'Parar',
+  'streamPanel.hintPre': 'Pressiona',
+  'streamPanel.hintMid': 'para reproduzir o torrent selecionado. As legendas escolhem-se no leitor.',
+  'streamPanel.hintPost': 'envia o magnet ao teu cliente BitTorrent predefinido.',
+
+  // ── Login extras ─────────────────────────────────────
+  'login.title': 'Iniciar sessão',
+  'login.username': 'Utilizador',
+  'login.password': 'Palavra-passe',
+  'login.submit': 'Iniciar sessão',
+  'login.hint': 'As credenciais ficam locais; nunca saem da tua máquina.',
+  'login.onlyDesktop': 'Esta janela só funciona dentro da app desktop.',
+  'login.verifying': 'A verificar…',
 }

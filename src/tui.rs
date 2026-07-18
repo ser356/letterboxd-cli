@@ -922,7 +922,7 @@ fn spawn_fetch(
         let result = async {
             let token = auth::get_access_token(&http, &config).await?;
             let lb = LetterboxdClient::new(&http, &token);
-            let tmdb = TmdbClient::new(&http, &config.tmdb_bearer_token);
+            let tmdb = TmdbClient::new(&http, &config.tmdb_bearer_token, None);
             build_recommendations(&lb, &tmdb, count, min_rating, &progress).await
         }
         .await;
@@ -984,7 +984,7 @@ fn spawn_torrents(
 
     tokio::spawn(async move {
         let result = async {
-            let tmdb = TmdbClient::new(&http, &bearer);
+            let tmdb = TmdbClient::new(&http, &bearer, None);
             // Detalles enriquecidos: IMDb ID + título original (inglés) +
             // título ruso + idioma original + año. El título original es
             // clave para acertar en Knaben/YTS: TMDB devuelve el traducido

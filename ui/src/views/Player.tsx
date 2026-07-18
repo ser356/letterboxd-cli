@@ -40,7 +40,7 @@ import {
   type StreamStats,
   type Subtitle,
 } from '../lib/api'
-import { getLocale, mergeSubtitleLangs } from '../lib/i18n'
+import { getLocale, mergeSubtitleLangs, useT } from '../lib/i18n'
 
 /**
  * Player HTML embebido. Reemplaza el spawn de VLC cuando la
@@ -112,6 +112,7 @@ const CONTROLS_HIDE_MS = 2500
 
 export function Player() {
   const nav = useNavigate()
+  const t = useT()
   const location = useLocation()
   const state = (location.state ?? null) as PlayerState | null
 
@@ -260,7 +261,7 @@ export function Player() {
   // Arranca el stream al montar; para al desmontar.
   useEffect(() => {
     if (!state?.magnet) {
-      setError('Sin magnet. Vuelve a la lista y proyecta un torrent.')
+      setError(t('player.noMagnet'))
       return
     }
     let cancelled = false
@@ -285,7 +286,7 @@ export function Player() {
         localStream = info
         setStream(info)
       } catch (e) {
-        setError(`No se pudo arrancar el stream: ${String(e)}`)
+        setError(t('player.startError', { err: String(e) }))
       }
     })()
     return () => {
@@ -1243,7 +1244,7 @@ export function Player() {
               onClick={handleBack}
               className="mt-4 rounded-sm border border-hairline bg-surface px-4 py-2 text-[13px] hover:bg-surface-hi"
             >
-              Volver
+              {t('common.back')}
             </button>
           </div>
         </div>
@@ -1264,7 +1265,7 @@ export function Player() {
         <button
           onClick={handleBack}
           className="flex h-9 w-9 items-center justify-center rounded-full bg-black/40 text-ink hover:bg-black/60"
-          title="Volver (Esc)"
+          title={t('player.backTitle')}
         >
           <CaretLeft size={18} weight="bold" />
         </button>
@@ -1280,7 +1281,7 @@ export function Player() {
           </p>
           {state.subRelease && (
             <p className="truncate text-[12px] text-muted">
-              Subs: {state.subRelease}
+              {t('player.subs')}: {state.subRelease}
             </p>
           )}
         </div>
@@ -1306,9 +1307,9 @@ export function Player() {
                 })
               }}
               className="rounded-full border border-accent bg-accent/10 px-3 py-1.5 text-[12px] font-semibold text-accent hover:bg-accent/20"
-              title="Siguiente episodio"
+              title={t('player.nextEpisodeTitle')}
             >
-              Siguiente episodio →
+              {t('player.nextEpisode')}
             </button>
           )}
       </div>

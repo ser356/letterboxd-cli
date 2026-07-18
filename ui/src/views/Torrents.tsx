@@ -25,6 +25,7 @@ import {
   type TorrentSearchResult,
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
+import { useT } from '../lib/i18n'
 
 /**
  * Vista `View::Torrents` de la TUI. Recibe `mode` por props:
@@ -40,6 +41,7 @@ import { useHotkeys, type Hotkey } from '../lib/hotkeys'
  */
 export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   const nav = useNavigate()
+  const t = useT()
   const { tmdbId } = useParams<{ tmdbId?: string }>()
   const [params] = useSearchParams()
   // Series: season/episode desde la URL. En mode !== 'series' quedan
@@ -164,9 +166,9 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
     if (!current) return
     try {
       await openMagnet(current.magnet)
-      setStreamMsg(`Magnet enviado al cliente por defecto: ${current.title}`)
+      setStreamMsg(t('torrents.magnet.sent', { name: current.title }))
     } catch (e) {
-      setStreamMsg(`Error abriendo magnet: ${String(e)}`)
+      setStreamMsg(t('torrents.magnet.error', { err: String(e) }))
     }
   }
 
@@ -222,9 +224,9 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
     // (dep faltante) usamos el player externo sin explicar el
     // motivo, para no exponer plumbing.
     if (defaultPlayer === 'html' && ffmpegOk === false && !forceVlc) {
-      setStreamMsg('Reproducci\u00f3n embebida no disponible. Abriendo con VLC\u2026')
+      setStreamMsg(t('torrents.stream.vlcFallback'))
     } else {
-      setStreamMsg(`Iniciando stream: ${current.title}\u2026`)
+      setStreamMsg(t('torrents.stream.starting', { name: current.title }))
     }
     if (stream) {
       await stopStream(stream.id).catch(() => {})
@@ -244,9 +246,9 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
       const resumeNote = resumeSeconds
         ? `  \u00b7  reanudado en ${formatMinutes(resumeSeconds)}`
         : ''
-      setStreamMsg(`Streaming ${info.file_name}${subNote}${resumeNote}`)
+      setStreamMsg(`${t('torrents.stream.started', { name: info.file_name })}${subNote}${resumeNote}`)
     } catch (e) {
-      setStreamMsg(`Error stream: ${String(e)}`)
+      setStreamMsg(t('torrents.stream.error', { err: String(e) }))
     }
   }
 
@@ -335,9 +337,9 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
     if (!current) return
     try {
       await navigator.clipboard.writeText(current.magnet)
-      setStreamMsg('Magnet copiado al portapapeles.')
+      setStreamMsg(t('torrents.magnet.copied'))
     } catch (e) {
-      setStreamMsg(`No se pudo copiar el magnet: ${String(e)}`)
+      setStreamMsg(t('torrents.magnet.copyError', { err: String(e) }))
     }
   }
 
@@ -368,17 +370,17 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
   const hotkeys: Hotkey[] = [
     { key: 'j', hint: '', run: () => move(1) },
     { key: 'ArrowDown', hint: '', run: () => move(1) },
-    { key: 'k', hint: 'Mover', run: () => move(-1) },
+    { key: 'k', hint: t('hotkey.move'), run: () => move(-1) },
     { key: 'ArrowUp', hint: '', run: () => move(-1) },
-    { key: 'Enter', hint: 'Proyectar', run: startStreamFlow },
-    { key: 's', hint: 'Magnet', run: goMagnet },
+    { key: 'Enter', hint: t('hotkey.play'), run: startStreamFlow },
+    { key: 's', hint: t('hotkey.magnet'), run: goMagnet },
     {
       key: 'm',
-      hint: 'Panel',
+      hint: t('hotkey.panel'),
       run: () => setShowMagnet((v) => !v),
     },
     { key: 'b', hint: '', run: goBack },
-    { key: 'Escape', hint: 'Volver', run: goBack },
+    { key: 'Escape', hint: t('common.back'), run: goBack },
   ]
   // Cuando el prompt de resume o el menú contextual están abiertos,
   // sus hotkeys locales toman el control y las de la vista se
@@ -421,9 +423,9 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
           </h1>
           <p className="text-[12px] tabular-nums text-dim">
             {loading
-              ? 'Buscando…'
+              ? t('torrents.searching')
               : result
-                ? `${torrents.length} resultados`
+                ? t('torrents.results', { n: torrents.length })
                 : ''}
           </p>
         </div>
@@ -455,20 +457,20 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-hairline">
             <div className="grid grid-cols-[3rem_1fr_5rem_4.5rem_4.5rem_4rem_4rem_5rem] items-center gap-x-3 border-b border-hairline bg-surface px-4 py-2 text-[11px] uppercase tracking-wide text-dim">
               <span>#</span>
-              <span>Release</span>
-              <span className="text-right">Tamaño</span>
-              <span className="text-right">Seeds</span>
-              <span className="text-right">Leech</span>
-              <span>Calidad</span>
-              <span>Audio</span>
-              <span>Fuente</span>
+              <span>{t('torrents.col.release')}</span>
+              <span className="text-right">{t('torrents.col.size')}</span>
+              <span className="text-right">{t('torrents.col.seeds')}</span>
+              <span className="text-right">{t('torrents.col.leech')}</span>
+              <span>{t('torrents.col.quality')}</span>
+              <span>{t('torrents.col.audio')}</span>
+              <span>{t('torrents.col.source')}</span>
             </div>
             <ul className="min-h-0 flex-1 overflow-y-auto">
-              {torrents.map((t, i) => (
+              {torrents.map((tor, i) => (
                 <TorrentRow
-                  key={t.magnet + i}
+                  key={tor.magnet + i}
                   ref={(el: HTMLLIElement | null) => { rowsRef.current[i] = el }}
-                  t={t}
+                  t={tor}
                   active={i === sel}
                   targetSeason={mode === 'series' ? season : null}
                   targetEpisode={mode === 'series' ? episode : null}
@@ -539,13 +541,13 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
           y={menu.y}
           onClose={() => setMenu(null)}
           items={((): ContextMenuItem[] => {
-            const t = torrents[menu.index]
-            if (!t) return []
+            const tor = torrents[menu.index]
+            if (!tor) return []
             const usingHtml =
               defaultPlayer === 'html' && ffmpegOk !== false
             const primaryLabel = usingHtml
-              ? 'Proyectar en player'
-              : 'Proyectar en VLC'
+              ? t('torrents.menu.playHtml')
+              : t('torrents.menu.playVlc')
             const items: ContextMenuItem[] = [
               {
                 label: primaryLabel,
@@ -559,7 +561,7 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
             // la entrada primaria ya es VLC.
             if (usingHtml) {
               items.push({
-                label: 'Abrir en VLC (este torrent)',
+                label: t('torrents.menu.playVlcOnce'),
                 onClick: () => {
                   void goStream(null, null, null, true)
                 },
@@ -567,17 +569,21 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
             }
             items.push(
               {
-                label: 'Abrir en cliente de torrents',
+                label: t('torrents.menu.openClient'),
                 hint: 's',
                 onClick: goMagnet,
               },
               {
-                label: 'Copiar magnet',
+                label: t('torrents.menu.copyMagnet'),
                 onClick: () => {
                   void copyMagnet()
                 },
               },
             )
+            // `tor` no se usaba aparte del early-return; mantenemos
+            // el shadow por si futuras entradas necesitan datos del
+            // torrent seleccionado (calidad, source, etc.).
+            void tor
             return items
           })()}
         />
