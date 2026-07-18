@@ -32,10 +32,14 @@
 //! que VLC arranque con `--start-time=<seg>`.
 
 use std::collections::HashMap;
+#[cfg(feature = "gui")]
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "gui")]
+use std::sync::Mutex as StdMutex;
 #[cfg(feature = "gui")]
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -459,6 +463,13 @@ struct HlsJob {
     /// audio switch), cancelamos también su warm-up para no dejar un
     /// FileStream vivo compitiendo con el del nuevo ffmpeg.
     warmup_cancel: Option<CancellationToken>,
+    /// Últimas ~60 líneas de `child.stderr` capturadas por la task
+    /// lectora spawneada en `spawn_hls`. Se consulta cuando el
+    /// proceso sale con código ≠ 0 para poder loguear el motivo real
+    /// (`ffmpeg` con `-loglevel error` emite solo lo importante).
+    /// Antes de esto la salida del proceso se descartaba al reventar,
+    /// dejando el log con "ffmpeg exited" sin diagnóstico.
+    stderr_tail: Arc<StdMutex<VecDeque<String>>>,
 }
 
 /// Duración fija de cada segmento HLS, en segundos. Debe coincidir
@@ -894,6 +905,7 @@ pub async fn start_with_target(
         .route("/hls/{file}", get(serve_hls_segment))
         .route("/hls/audio", axum::routing::post(set_hls_audio))
         .route("/subs/embedded/{idx}", get(serve_embedded_subtitle))
+        .layer(axum::middleware::from_fn(log_hls_requests))
         .layer(axum::middleware::from_fn(add_cors_headers))
         .with_state(state);
     #[cfg(not(feature = "gui"))]
@@ -1859,9 +1871,27 @@ async fn serve_hls_segment(
             match hls.job.as_mut() {
                 None => Action::Spawn,
                 Some(job) => {
-                    // ffmpeg vivo?
-                    let alive = matches!(job.child.try_wait(), Ok(None));
+                    // ffmpeg vivo? `try_wait` reap-ea el status si el
+                    // proceso ya salió; capturamos ese status ANTES de
+                    // marcar el job para respawn, porque el segundo
+                    // `try_wait` sobre un child ya reap-eado devolvería
+                    // `Ok(None)` y perderíamos el código + el motivo.
+                    let wait_result = job.child.try_wait();
+                    let alive = matches!(wait_result, Ok(None));
                     if !alive {
+                        if let Ok(Some(status)) = wait_result {
+                            if !status.success() {
+                                let tail = snapshot_stderr_tail(&job.stderr_tail);
+                                tracing::warn!(
+                                    target: "ffmpeg",
+                                    code = %status,
+                                    stderr_tail = %tail,
+                                    start_idx = job.start_idx,
+                                    requested_idx = idx,
+                                    "ffmpeg (hls) exited unexpectedly"
+                                );
+                            }
+                        }
                         Action::Spawn
                     } else if idx < job.start_idx {
                         // Seek hacia atrás fuera de la ventana del
@@ -2089,7 +2119,7 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
         None
     };
 
-    let child = spawn_hls(state, &dir, idx, audio_idx, mode, start_seconds).await?;
+    let (child, stderr_tail) = spawn_hls(state, &dir, idx, audio_idx, mode, start_seconds).await?;
     // Detección de fallo temprano: si el argv es inválido
     // (filter missing, codec sin soporte, PATH roto…) ffmpeg
     // muere en <100 ms con exit != 0. Sin este check el loop de
@@ -2108,6 +2138,13 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
             if let Some(token) = warmup_cancel.as_ref() {
                 token.cancel();
             }
+            let tail = snapshot_stderr_tail(&stderr_tail);
+            tracing::warn!(
+                target: "ffmpeg",
+                code = %status,
+                stderr_tail = %tail,
+                "ffmpeg (hls) exited during warmup window"
+            );
             let msg = format!(
                 "ffmpeg exited with {} in <500ms (probablemente filter/codec no soportado)",
                 status
@@ -2134,8 +2171,22 @@ async fn ensure_hls_job(state: &AppState, idx: u64) -> Result<(), (StatusCode, S
         child,
         start_idx: idx,
         warmup_cancel,
+        stderr_tail,
     });
     Ok(())
+}
+
+/// Snapshot de las últimas líneas de stderr capturadas por el
+/// reader task de `spawn_hls`. Devuelve una `String` multilínea
+/// (una por línea) lista para inyectar en un `tracing::warn!`.
+/// Corto y lock-free frente a la task lectora: solo bloqueamos
+/// mientras clonamos el `VecDeque`.
+#[cfg(feature = "gui")]
+fn snapshot_stderr_tail(tail: &Arc<StdMutex<VecDeque<String>>>) -> String {
+    match tail.lock() {
+        Ok(buf) => buf.iter().cloned().collect::<Vec<_>>().join("\n"),
+        Err(_) => String::new(),
+    }
 }
 
 /// Fuerza a librqbit a priorizar las piezas del torrent que ffmpeg
@@ -2487,7 +2538,7 @@ async fn spawn_hls(
     audio_idx: Option<usize>,
     mode: HlsMode,
     start_seconds: f64,
-) -> Result<tokio::process::Child, (StatusCode, String)> {
+) -> Result<(tokio::process::Child, Arc<StdMutex<VecDeque<String>>>), (StatusCode, String)> {
     let bin = crate::ffmpeg::ffmpeg_binary().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2540,6 +2591,13 @@ async fn spawn_hls(
         }
     }
     // Video: rama COPY vs TRANSCODE.
+    tracing::info!(
+        target: "hls",
+        mode = ?mode,
+        idx,
+        start_seconds,
+        "video: argv decision"
+    );
     match mode {
         HlsMode::Copy => {
             // Audit §2: remux sin pérdida. Con -c:v copy no se
@@ -2665,7 +2723,7 @@ async fn spawn_hls(
         cmd.arg("-c:a").arg("copy");
         // AAC en MPEG-TS: ffmpeg añade ADTS headers automáticamente
         // al copiar desde MP4/MKV. AC-3 / E-AC-3 / MP3 van directo.
-        tracing::debug!(
+        tracing::info!(
             target: "hls",
             src = ?in_audio_codec,
             channels = ?audio_channels,
@@ -2680,7 +2738,7 @@ async fn spawn_hls(
         //   * 3-6ch (5.1):        384k
         //   * 7+ch (7.1):         512k
         let aac_bitrate = aac_bitrate_for_channels(audio_channels);
-        tracing::debug!(
+        tracing::info!(
             target: "hls",
             src = ?in_audio_codec,
             channels = ?audio_channels,
@@ -2725,7 +2783,13 @@ async fn spawn_hls(
             format!("spawn ffmpeg (hls): {e}"),
         )
     })?;
+    // Anillo circular de las últimas ~60 líneas del stderr para
+    // poder loguearlas al detectar exit != 0. Sin esto, el warn
+    // acaba siendo "ffmpeg died, exit=N" sin pista de causa.
+    let stderr_tail: Arc<StdMutex<VecDeque<String>>> =
+        Arc::new(StdMutex::new(VecDeque::with_capacity(64)));
     if let Some(stderr) = child.stderr.take() {
+        let tail_task = stderr_tail.clone();
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stderr).lines();
@@ -2735,6 +2799,12 @@ async fn spawn_hls(
                 // `VIDEODROME_LOG_LEVEL=debug` el usuario ve el argv
                 // completo + errores por consola.
                 tracing::debug!(target: "ffmpeg-hls", "{line}");
+                if let Ok(mut buf) = tail_task.lock() {
+                    if buf.len() >= 60 {
+                        buf.pop_front();
+                    }
+                    buf.push_back(line);
+                }
             }
         });
     }
@@ -2747,7 +2817,7 @@ async fn spawn_hls(
         dir = %dir.display(),
         "ffmpeg spawned"
     );
-    Ok(child)
+    Ok((child, stderr_tail))
 }
 
 /// Middleware que añade cabeceras CORS permisivas a toda respuesta del
@@ -2788,6 +2858,32 @@ async fn add_cors_headers(req: axum::extract::Request, next: axum::middleware::N
     headers.insert(
         "Access-Control-Expose-Headers",
         HeaderValue::from_static("Content-Length, Content-Range, Accept-Ranges"),
+    );
+    resp
+}
+
+/// Middleware que emite un `info!` por cada petición a `/hls/*` con
+/// método, ruta y status de la respuesta. Complementa a
+/// `add_cors_headers`: se aplica ANTES (queda arriba en la pila de
+/// layers) para que el `status` reflejado sea el emitido por el
+/// handler (los handlers HLS pueden devolver 200 / 503 / 504 / 500
+/// según deadline / stalled / fatal, y sin este log era imposible
+/// correlacionar la request del WebView con el `warn!` interno).
+#[cfg(feature = "gui")]
+async fn log_hls_requests(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path().to_string();
+    let is_hls = path.starts_with("/hls/");
+    if !is_hls {
+        return next.run(req).await;
+    }
+    let method = req.method().clone();
+    let resp = next.run(req).await;
+    tracing::info!(
+        target: "hls-http",
+        method = %method,
+        path = %path,
+        status = resp.status().as_u16(),
+        "hls request"
     );
     resp
 }
@@ -3015,6 +3111,19 @@ async fn serve_embedded_subtitle(
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
+        // Antes tirábamos el stderr al vacío en la rama 415:
+        // devolvíamos "no bitmap sub" sin evidencia real del motivo,
+        // así que un fallo distinto (input inaccesible, filter roto)
+        // se camuflaba de "unsupported" y no se diagnosticaba nunca.
+        // Logueamos la cola completa a `warn!(target: "ffmpeg", ...)`.
+        tracing::warn!(
+            target: "ffmpeg",
+            code = %output.status,
+            idx,
+            classified = if unsupported { "unsupported" } else { "internal" },
+            stderr_tail = %stderr,
+            "ffmpeg (subs embedded) exited"
+        );
         return Err((code, format!("ffmpeg extraction failed: {stderr}")));
     }
 

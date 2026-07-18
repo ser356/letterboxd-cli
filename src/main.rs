@@ -211,7 +211,14 @@ fn main() -> Result<()> {
         Some(Commands::Tui { .. }) => logging::StderrPolicy::Suppressed,
         _ => logging::StderrPolicy::Enabled,
     };
-    let _log_file = logging::init(stderr_policy).ok().flatten();
+    // `_log_guard` DEBE vivir hasta el final de `main`. El appender
+    // no-blocking flushea su canal MPSC interno en el `Drop` del
+    // guard; si se dropea antes (o si lo metemos en un `static` como
+    // hacíamos antes — los statics no dropean al retornar de main),
+    // las últimas líneas del log se pierden y el fichero queda con
+    // la cola amputada, disfrazando fallos que ocurrieron justo
+    // antes del exit (típico: crash de ffmpeg en el respawn final).
+    let (_log_file, _log_guard) = logging::init(stderr_policy).unwrap_or((None, None));
     if let Some(path) = _log_file.as_ref() {
         tracing::info!(target: "logging", path = %path.display(), "log file activo");
     }

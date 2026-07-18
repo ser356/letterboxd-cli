@@ -32,9 +32,8 @@
 //!     format: `info,videodrome::stream=debug`). Default `info`.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
-use tracing_appender::non_blocking::WorkerGuard;
+pub use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -52,17 +51,21 @@ pub enum StderrPolicy {
     Suppressed,
 }
 
-/// El `WorkerGuard` del appender no-blocking. Debe vivir hasta el
-/// final del proceso para que las últimas líneas no se pierdan al
-/// hacer flush del canal MPSC interno.
-static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
-
 /// Inicializa el subscriber global de `tracing`. Idempotente — si ya
 /// se llamó, silenciosamente no hace nada.
 ///
-/// Return: `Ok(Some(path))` si se activó la capa fichero, `None` si
-/// no. `main.rs` lo usa para loguear la ruta al arrancar.
-pub fn init(stderr_policy: StderrPolicy) -> anyhow::Result<Option<PathBuf>> {
+/// Return: `(path, guard)`.
+///
+///   * `path` = `Some` si se activó la capa fichero (para que
+///     `main.rs` pueda loguearla al arrancar).
+///   * `guard` = `Some(WorkerGuard)` cuando hay capa fichero. El
+///     caller (`main`) DEBE mantenerlo vivo hasta el final del
+///     proceso. Al drop del guard se flushea el canal MPSC interno
+///     del appender no-blocking; si se dropea antes de tiempo, o
+///     nunca (p.ej. guardado en un `static` — los statics no
+///     dropean al retornar de main), las últimas líneas se pierden
+///     silenciosamente y el log queda amputado.
+pub fn init(stderr_policy: StderrPolicy) -> anyhow::Result<(Option<PathBuf>, Option<WorkerGuard>)> {
     let filter =
         EnvFilter::try_from_env("VIDEODROME_LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -86,9 +89,9 @@ pub fn init(stderr_policy: StderrPolicy) -> anyhow::Result<Option<PathBuf>> {
     // situ para que Rust pueda inferir el parámetro `S` de cada
     // `fmt::Layer` en cadena — factorizarlo a funciones/closures fija
     // `S = Registry` y rompe la composición con `Layered<...>`.
-    let file_result = match (stderr_enabled, file_target) {
+    let (file_result, guard_result) = match (stderr_enabled, file_target) {
         (true, Some(path)) => {
-            let (writer, path) = open_file_writer(path);
+            let (writer, path, guard) = open_file_writer(path);
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -107,7 +110,7 @@ pub fn init(stderr_policy: StderrPolicy) -> anyhow::Result<Option<PathBuf>> {
                 )
                 .try_init()
                 .ok();
-            Some(path)
+            (Some(path), Some(guard))
         }
         (true, None) => {
             tracing_subscriber::registry()
@@ -121,10 +124,10 @@ pub fn init(stderr_policy: StderrPolicy) -> anyhow::Result<Option<PathBuf>> {
                 )
                 .try_init()
                 .ok();
-            None
+            (None, None)
         }
         (false, Some(path)) => {
-            let (writer, path) = open_file_writer(path);
+            let (writer, path, guard) = open_file_writer(path);
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -136,21 +139,31 @@ pub fn init(stderr_policy: StderrPolicy) -> anyhow::Result<Option<PathBuf>> {
                 )
                 .try_init()
                 .ok();
-            Some(path)
+            (Some(path), Some(guard))
         }
         (false, None) => {
             tracing_subscriber::registry().with(filter).try_init().ok();
-            None
+            (None, None)
         }
     };
 
-    Ok(file_result)
+    Ok((file_result, guard_result))
 }
 
-/// Abre el fichero destino como `NonBlocking` writer y guarda el
-/// `WorkerGuard` global. Devuelve el writer + el path efectivo (que
-/// puede diferir del input si el parent dir no existía y se creó).
-fn open_file_writer(path: PathBuf) -> (tracing_appender::non_blocking::NonBlocking, PathBuf) {
+/// Abre el fichero destino como `NonBlocking` writer y devuelve el
+/// writer + el path efectivo (que puede diferir del input si el
+/// parent dir no existía y se creó) + el `WorkerGuard` — el caller
+/// lo propaga hasta `main` para mantenerlo vivo. Antes lo guardaba
+/// en un `static OnceLock`, pero los statics NUNCA dropean al
+/// retornar de `main`, así que el flush del buffer no-blocking no
+/// se ejecutaba y las últimas líneas del log se perdían.
+fn open_file_writer(
+    path: PathBuf,
+) -> (
+    tracing_appender::non_blocking::NonBlocking,
+    PathBuf,
+    WorkerGuard,
+) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -166,8 +179,7 @@ fn open_file_writer(path: PathBuf) -> (tracing_appender::non_blocking::NonBlocki
     // `info` estamos en cientos de KB por sesión típica.
     let appender = tracing_appender::rolling::never(dir, name);
     let (writer, guard) = tracing_appender::non_blocking(appender);
-    let _ = LOG_GUARD.set(guard);
-    (writer, path)
+    (writer, path, guard)
 }
 
 /// Determina la ruta destino del log a fichero. Reglas:
