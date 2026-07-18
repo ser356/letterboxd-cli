@@ -82,7 +82,7 @@ use std::sync::Arc;
 use self::evict::spawn_lru_evictor;
 use self::grid::decide_mode_and_segments;
 use self::job::{ensure_hls_job, snapshot_stderr_tail};
-use super::ensure_probe;
+use super::server::ensure_probe;
 use super::state::{current_client_capabilities, HLS_LOOKAHEAD, HLS_SEG_SECS};
 
 // ── HLS: playlist estático + segmentos on-demand ──────────────────────────
