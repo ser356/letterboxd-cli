@@ -816,10 +816,7 @@ mod tests {
     fn sort_trusted_before_untrusted_same_language() {
         // Dentro del mismo idioma, el sub verificado por moderador
         // debe aparecer primero.
-        let mut subs = vec![
-            make_sub("es", false, 5000),
-            make_sub("es", true, 100),
-        ];
+        let mut subs = vec![make_sub("es", false, 5000), make_sub("es", true, 100)];
         rank_subtitles(&mut subs, "es");
         assert!(subs[0].from_trusted, "trusted debe ir primero");
         assert!(!subs[1].from_trusted);
@@ -844,10 +841,7 @@ mod tests {
     #[test]
     fn sort_unlisted_language_goes_to_end() {
         // Idioma no listado en la preferencia → al final.
-        let mut subs = vec![
-            make_sub("ja", false, 999),
-            make_sub("es", false, 1),
-        ];
+        let mut subs = vec![make_sub("ja", false, 999), make_sub("es", false, 1)];
         rank_subtitles(&mut subs, "es,en");
         assert_eq!(subs[0].language, "es");
         assert_eq!(subs[1].language, "ja");

@@ -667,6 +667,10 @@ mod tests {
         ])));
         let _ = snapshot_stderr_tail(&tail);
         let guard = tail.lock().expect("lock");
-        assert_eq!(guard.len(), 2, "buffer debe permanecer intacto tras snapshot");
+        assert_eq!(
+            guard.len(),
+            2,
+            "buffer debe permanecer intacto tras snapshot"
+        );
     }
 }

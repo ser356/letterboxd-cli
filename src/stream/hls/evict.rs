@@ -183,7 +183,10 @@ mod tests {
         evict_once_sync(dir.path(), 5_000, playhead).expect("evict_once_sync");
         for idx in 12u64..=28 {
             let path = dir.path().join(format!("seg-{idx:05}.ts"));
-            assert!(path.exists(), "seg-{idx:05}.ts debe estar protegido por safety window");
+            assert!(
+                path.exists(),
+                "seg-{idx:05}.ts debe estar protegido por safety window"
+            );
         }
     }
 
@@ -193,10 +196,10 @@ mod tests {
         let playhead = 50u64;
         // Safety window: abs_diff(idx, 50) <= 8 → [42, 58].
         // Far behind (dist=50 > 8), near protected (dist=0 ≤ 8).
-        write_seg(dir.path(), 0, 500_000);   // dist=50, fuera de ventana
-        write_seg(dir.path(), 30, 500_000);  // dist=20, fuera de ventana
-        write_seg(dir.path(), 50, 500_000);  // dist=0, dentro de ventana (playhead)
-        // Budget 800_000, total 1_500_000 → se debe evictar al menos un segmento lejano.
+        write_seg(dir.path(), 0, 500_000); // dist=50, fuera de ventana
+        write_seg(dir.path(), 30, 500_000); // dist=20, fuera de ventana
+        write_seg(dir.path(), 50, 500_000); // dist=0, dentro de ventana (playhead)
+                                            // Budget 800_000, total 1_500_000 → se debe evictar al menos un segmento lejano.
         evict_once_sync(dir.path(), 800_000, playhead).expect("evict_once_sync");
         assert!(
             dir.path().join("seg-00050.ts").exists(),
@@ -218,7 +221,7 @@ mod tests {
         // El evictor prioriza los de ATRÁS según la política de score.
         write_seg(dir.path(), 30, 500_000); // detrás, dist=20
         write_seg(dir.path(), 70, 500_000); // delante, dist=20
-        // Budget 600 000, total 1 000 000 → target 540 000 → basta evictar uno.
+                                            // Budget 600 000, total 1 000 000 → target 540 000 → basta evictar uno.
         evict_once_sync(dir.path(), 600_000, playhead).expect("evict_once_sync");
         assert!(
             dir.path().join("seg-00070.ts").exists(),
@@ -240,6 +243,9 @@ mod tests {
         write_seg(dir.path(), 0, 100);
         evict_once_sync(dir.path(), 10_000, 100).expect("evict_once_sync");
         assert!(tmp.exists(), ".ts.tmp no debe ser eliminado por el evictor");
-        assert!(dir.path().join("seg-00000.ts").exists(), ".ts bajo presupuesto conservado");
+        assert!(
+            dir.path().join("seg-00000.ts").exists(),
+            ".ts bajo presupuesto conservado"
+        );
     }
 }
