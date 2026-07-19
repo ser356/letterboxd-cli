@@ -207,6 +207,37 @@ export interface DismissedEntry {
 export const listDismissed = () =>
   invoke<DismissedEntry[]>('list_dismissed')
 
+/** Vacía el catálogo entero de descartes. Ajustes → "Restablecer". */
+export const clearDismissed = () => invoke<void>('clear_dismissed')
+
+/** Marca una película como "ya vista". Análogo a dismiss: el frontend
+ * la elimina del feed al instante y se persiste en `watched.json`. */
+export const markWatched = (
+  tmdbId: number,
+  title: string,
+  posterPath: string | null,
+) =>
+  invoke<void>('mark_watched', {
+    tmdbId,
+    title,
+    posterPath,
+  })
+
+export const unmarkWatched = (tmdbId: number) =>
+  invoke<void>('unmark_watched', { tmdbId })
+
+export interface WatchedEntry {
+  id: number
+  title: string
+  poster_path: string | null
+  watched_at: number
+}
+
+export const listWatched = () => invoke<WatchedEntry[]>('list_watched')
+
+/** Vacía el catálogo entero de vistas. Ajustes → "Restablecer". */
+export const clearWatched = () => invoke<void>('clear_watched')
+
 // -------- Torrents --------
 
 export const searchTorrentsByTmdb = (

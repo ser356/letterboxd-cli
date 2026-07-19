@@ -39,6 +39,8 @@ mod subtitles;
 mod tmdb;
 mod torrents;
 mod tui;
+#[cfg(feature = "gui")]
+mod watched;
 mod winutil;
 
 use anyhow::{Context, Result};
@@ -54,7 +56,8 @@ use tmdb::TmdbClient;
 #[derive(Parser)]
 #[command(
     name = "videodrome",
-    about = "Recomendaciones de películas desde Letterboxd"
+    about = "Recomendaciones de películas desde Letterboxd",
+    version
 )]
 struct Cli {
     /// Subcomando a ejecutar. Si se omite, arranca la TUI con los valores

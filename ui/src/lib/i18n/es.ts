@@ -78,6 +78,11 @@ export const es: Record<string, string> = {
   'torrents.menu.playVlcOnce': 'Abrir en VLC (este torrent)',
   'torrents.menu.openClient': 'Abrir en cliente de torrents',
   'torrents.menu.copyMagnet': 'Copiar magnet',
+  'torrents.loader.msg1': 'Consultando indexadores (YTS, PirateBay, Knaben)…',
+  'torrents.loader.msg2': 'Filtrando series de TV, CAMs y torrents muertos…',
+  'torrents.loader.msg3': 'Refinando resultados por calidad y seeders…',
+  'torrents.loader.hint':
+    'Los indexadores tardan unos segundos. Consultamos varios en paralelo y luego descartamos la basura antes de mostrarte la lista.',
 
   // ── Series detail ─────────────────────────────────────
   'series.badge': 'Serie',
@@ -101,6 +106,8 @@ export const es: Record<string, string> = {
   'player.noMagnet': 'Sin magnet. Vuelve a la lista y proyecta un torrent.',
   'player.startError': 'No se pudo arrancar el stream: {{err}}',
   'player.backTitle': 'Volver (Esc)',
+  'player.loading': 'Cargando',
+  'player.noData': 'Sin datos de reproducción.',
 
   // ── Settings ──────────────────────────────────────────
   'settings.title': 'Ajustes',
@@ -185,8 +192,11 @@ export const es: Record<string, string> = {
   'recs.endOfList': 'Fin de la cartelera. {{n}} recomendaciones.',
   'recs.dismissError': 'Error al descartar: {{err}}',
   'recs.dismissedFlash': 'Descartada: {{title}}. Restaurar desde Ajustes.',
+  'recs.watchedError': 'Error al marcar como vista: {{err}}',
+  'recs.watchedFlash': 'Marcada como vista: {{title}}. Restaurar desde Ajustes.',
   'recs.menu.detail': 'Ver detalle',
   'recs.menu.torrents': 'Ver torrents',
+  'recs.menu.markWatched': 'Marcar como vista',
 
   // ── Movie detail modal ───────────────────────────────
   'movieDetail.noOverview': 'Sin sinopsis disponible.',
@@ -212,6 +222,16 @@ export const es: Record<string, string> = {
   'settings.dismissed.empty':
     'No has descartado ninguna recomendación. Usa clic derecho sobre una peli en Cartelera → "No sugerir".',
   'settings.dismissed.restored': 'Restaurada: {{title}}',
+  'settings.dismissed.clearAll': 'Restablecer',
+  'settings.dismissed.allCleared': 'Descartes restablecidos.',
+  'settings.watched.section': 'Catálogo de vistas',
+  'settings.watched.count': '{{n}} películas',
+  'settings.watched.count1': '1 película',
+  'settings.watched.empty':
+    'No has marcado ninguna película como vista. Usa clic derecho en Cartelera → "Marcar como vista".',
+  'settings.watched.restored': 'Devuelta al feed: {{title}}',
+  'settings.watched.clearAll': 'Restablecer',
+  'settings.watched.allCleared': 'Catálogo de vistas restablecido.',
   'settings.cache.cleared': 'Caché "{{kind}}" borrada.',
   'settings.cache.allCleared': 'Todas las cachés borradas.',
   'settings.cache.updatedAgo': 'Actualizada {{age}}',

@@ -67,6 +67,11 @@ export const fr: Record<string, string> = {
   'torrents.menu.playVlcOnce': 'Ouvrir dans VLC (ce torrent)',
   'torrents.menu.openClient': 'Ouvrir dans le client torrent',
   'torrents.menu.copyMagnet': 'Copier le magnet',
+  'torrents.loader.msg1': 'Interrogation des indexeurs (YTS, PirateBay, Knaben)…',
+  'torrents.loader.msg2': 'Élimination des séries TV, CAMs et torrents morts…',
+  'torrents.loader.msg3': 'Affinage des résultats par qualité et seeders…',
+  'torrents.loader.hint':
+    'Les indexeurs prennent quelques secondes. Nous interrogeons plusieurs en parallèle puis nous filtrons le rebut avant de vous montrer la liste.',
 
   // ── Series detail ─────────────────────────────────────
   'series.badge': 'Série',
@@ -86,6 +91,8 @@ export const fr: Record<string, string> = {
   'player.nextEpisode': 'Épisode suivant →',
   'player.nextEpisodeTitle': 'Épisode suivant',
   'player.backTitle': 'Retour (Échap)',
+  'player.loading': 'Chargement',
+  'player.noData': 'Aucune donnée de lecture.',
 
   // ── Settings ──────────────────────────────────────────
   'settings.title': 'Paramètres',
@@ -129,6 +136,8 @@ export const fr: Record<string, string> = {
   'home.optionRecsLabel': 'Recommandations depuis Letterboxd',
   'home.optionRecsHint': 'Générer et parcourir des films recommandés basés sur votre historique.',
   'home.optionSearchLabel': 'Rechercher des torrents directement',
+  'home.dismiss': 'Ne plus suggérer',
+  'home.restore': 'Restaurer',
   'home.optionSearchHint': 'Tapez un titre et cherchez des torrents sans passer par Letterboxd.',
 
   // ── HotkeyBar tooltip ────────────────────────────────
@@ -159,8 +168,11 @@ export const fr: Record<string, string> = {
   'recs.endOfList': 'Fin de la liste. {{n}} recommandations.',
   'recs.dismissError': 'Erreur en écartant : {{err}}',
   'recs.dismissedFlash': 'Écartée : {{title}}. Restaurer depuis Paramètres.',
+  'recs.watchedError': 'Erreur en marquant comme vu : {{err}}',
+  'recs.watchedFlash': 'Marqué comme vu : {{title}}. Restaurer depuis Paramètres.',
   'recs.menu.detail': 'Voir le détail',
   'recs.menu.torrents': 'Voir les torrents',
+  'recs.menu.markWatched': 'Marquer comme vu',
 
   // ── Movie detail modal ───────────────────────────────
   'movieDetail.noOverview': 'Aucun synopsis disponible.',
@@ -186,6 +198,16 @@ export const fr: Record<string, string> = {
   'settings.dismissed.empty':
     'Vous n’avez rien écarté. Clic droit sur un film dans « À l’affiche » → « Ne plus suggérer ».',
   'settings.dismissed.restored': 'Restaurée : {{title}}',
+  'settings.dismissed.clearAll': 'Réinitialiser',
+  'settings.dismissed.allCleared': 'Suggestions réinitialisées.',
+  'settings.watched.section': 'Catalogue des vus',
+  'settings.watched.count': '{{n}} films',
+  'settings.watched.count1': '1 film',
+  'settings.watched.empty':
+    'Aucun film marqué comme vu. Clic droit dans « À l’affiche » → « Marquer comme vu ».',
+  'settings.watched.restored': 'De retour au feed : {{title}}',
+  'settings.watched.clearAll': 'Réinitialiser',
+  'settings.watched.allCleared': 'Catalogue des vus réinitialisé.',
   'settings.cache.cleared': 'Cache « {{kind}} » vidé.',
   'settings.cache.allCleared': 'Tous les caches vidés.',
   'settings.cache.updatedAgo': 'Mis à jour {{age}}',

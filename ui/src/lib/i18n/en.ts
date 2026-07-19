@@ -80,6 +80,11 @@ export const en: Record<string, string> = {
   'torrents.menu.playVlcOnce': 'Open in VLC (this torrent)',
   'torrents.menu.openClient': 'Open in torrent client',
   'torrents.menu.copyMagnet': 'Copy magnet',
+  'torrents.loader.msg1': 'Querying indexers (YTS, PirateBay, Knaben)…',
+  'torrents.loader.msg2': 'Filtering TV shows, CAMs and dead torrents…',
+  'torrents.loader.msg3': 'Refining results by quality and seeders…',
+  'torrents.loader.hint':
+    'Indexers take a few seconds. We query several in parallel, then discard the junk before showing you the list.',
 
   // ── Series detail ─────────────────────────────────────
   'series.badge': 'Series',
@@ -103,6 +108,8 @@ export const en: Record<string, string> = {
   'player.noMagnet': 'No magnet. Go back to the list and play a torrent.',
   'player.startError': 'Could not start stream: {{err}}',
   'player.backTitle': 'Back (Esc)',
+  'player.loading': 'Loading',
+  'player.noData': 'No playback data.',
 
   // ── Settings ──────────────────────────────────────────
   'settings.title': 'Settings',
@@ -187,8 +194,11 @@ export const en: Record<string, string> = {
   'recs.endOfList': 'End of the list. {{n}} recommendations.',
   'recs.dismissError': 'Error dismissing: {{err}}',
   'recs.dismissedFlash': 'Dismissed: {{title}}. Restore from Settings.',
+  'recs.watchedError': 'Error marking as watched: {{err}}',
+  'recs.watchedFlash': 'Marked as watched: {{title}}. Restore from Settings.',
   'recs.menu.detail': 'View detail',
   'recs.menu.torrents': 'View torrents',
+  'recs.menu.markWatched': 'Mark as watched',
 
   // ── Movie detail modal ───────────────────────────────
   'movieDetail.noOverview': 'No synopsis available.',
@@ -214,6 +224,16 @@ export const en: Record<string, string> = {
   'settings.dismissed.empty':
     'You have not dismissed any recommendation. Right-click a movie in Now Playing → "Do not suggest".',
   'settings.dismissed.restored': 'Restored: {{title}}',
+  'settings.dismissed.clearAll': 'Reset',
+  'settings.dismissed.allCleared': 'Dismissed suggestions reset.',
+  'settings.watched.section': 'Watched catalogue',
+  'settings.watched.count': '{{n}} movies',
+  'settings.watched.count1': '1 movie',
+  'settings.watched.empty':
+    'You have not marked any movie as watched. Right-click a movie in Now Playing → "Mark as watched".',
+  'settings.watched.restored': 'Back to feed: {{title}}',
+  'settings.watched.clearAll': 'Reset',
+  'settings.watched.allCleared': 'Watched catalogue reset.',
   'settings.cache.cleared': 'Cache "{{kind}}" cleared.',
   'settings.cache.allCleared': 'All caches cleared.',
   'settings.cache.updatedAgo': 'Updated {{age}}',

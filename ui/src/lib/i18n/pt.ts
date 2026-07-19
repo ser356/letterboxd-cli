@@ -66,6 +66,11 @@ export const pt: Record<string, string> = {
   'torrents.menu.playVlcOnce': 'Abrir em VLC (este torrent)',
   'torrents.menu.openClient': 'Abrir no cliente de torrents',
   'torrents.menu.copyMagnet': 'Copiar magnet',
+  'torrents.loader.msg1': 'A consultar indexadores (YTS, PirateBay, Knaben)…',
+  'torrents.loader.msg2': 'A filtrar séries de TV, CAMs e torrents mortos…',
+  'torrents.loader.msg3': 'A refinar resultados por qualidade e seeders…',
+  'torrents.loader.hint':
+    'Os indexadores demoram uns segundos. Consultamos vários em paralelo e depois descartamos o lixo antes de te mostrar a lista.',
 
   // ── Series detail ─────────────────────────────────────
   'series.badge': 'Série',
@@ -85,6 +90,8 @@ export const pt: Record<string, string> = {
   'player.nextEpisode': 'Próximo episódio →',
   'player.nextEpisodeTitle': 'Próximo episódio',
   'player.backTitle': 'Voltar (Esc)',
+  'player.loading': 'A carregar',
+  'player.noData': 'Sem dados de reprodução.',
 
   // ── Settings ──────────────────────────────────────────
   'settings.title': 'Definições',
@@ -128,6 +135,8 @@ export const pt: Record<string, string> = {
   'home.optionRecsLabel': 'Recomendações do Letterboxd',
   'home.optionRecsHint': 'Gera e navega por filmes recomendados com base no teu histórico.',
   'home.optionSearchLabel': 'Pesquisar torrents diretamente',
+  'home.dismiss': 'Não sugerir',
+  'home.restore': 'Restaurar',
   'home.optionSearchHint': 'Escreve um título e pesquisa torrents sem passar pelo Letterboxd.',
 
   // ── HotkeyBar tooltip ────────────────────────────────
@@ -158,8 +167,11 @@ export const pt: Record<string, string> = {
   'recs.endOfList': 'Fim da lista. {{n}} recomendações.',
   'recs.dismissError': 'Erro ao descartar: {{err}}',
   'recs.dismissedFlash': 'Descartada: {{title}}. Restaurar em Definições.',
+  'recs.watchedError': 'Erro ao marcar como visto: {{err}}',
+  'recs.watchedFlash': 'Marcado como visto: {{title}}. Restaurar em Definições.',
   'recs.menu.detail': 'Ver detalhe',
   'recs.menu.torrents': 'Ver torrents',
+  'recs.menu.markWatched': 'Marcar como visto',
 
   // ── Movie detail modal ───────────────────────────────
   'movieDetail.noOverview': 'Sem sinopse disponível.',
@@ -185,6 +197,16 @@ export const pt: Record<string, string> = {
   'settings.dismissed.empty':
     'Não descartaste nenhuma recomendação. Clique direito num filme em «Em cartaz» → «Não sugerir».',
   'settings.dismissed.restored': 'Restaurada: {{title}}',
+  'settings.dismissed.clearAll': 'Repor',
+  'settings.dismissed.allCleared': 'Descartes repostos.',
+  'settings.watched.section': 'Catálogo de vistos',
+  'settings.watched.count': '{{n}} filmes',
+  'settings.watched.count1': '1 filme',
+  'settings.watched.empty':
+    'Ainda não marcaste nenhum filme como visto. Clique direito em «Em cartaz» → «Marcar como visto».',
+  'settings.watched.restored': 'Voltou ao feed: {{title}}',
+  'settings.watched.clearAll': 'Repor',
+  'settings.watched.allCleared': 'Catálogo de vistos reposto.',
   'settings.cache.cleared': 'Cache «{{kind}}» limpa.',
   'settings.cache.allCleared': 'Todas as caches limpas.',
   'settings.cache.updatedAgo': 'Atualizada {{age}}',

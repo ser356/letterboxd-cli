@@ -12,6 +12,7 @@ import {
   getPreferences,
   getRecommendationsPage,
   isTauri,
+  markWatched,
   tmdbPoster,
   type Recommendation,
 } from '../lib/api'
@@ -185,18 +186,19 @@ export function Recommendations() {
    * hace falta — el user simplemente ve una peli menos y las
    * siguientes páginas ya llegarán filtradas.
    */
-  const dismissCurrent = async (rec: Recommendation) => {
+  const removeCard = async (
+    rec: Recommendation,
+    call: () => Promise<void>,
+    flashKey: 'recs.dismissedFlash' | 'recs.watchedFlash',
+    errKey: 'recs.dismissError' | 'recs.watchedError',
+  ) => {
     if (dismissingId !== null) return
     setDismissingId(rec.movie.id)
 
     // Fire-and-forget al backend. Si falla, avisamos pero no
     // deshacemos el fade — el usuario ya vio el efecto.
-    void dismissRecommendation(
-      rec.movie.id,
-      rec.movie.title,
-      rec.movie.poster_path,
-    ).catch((e) => {
-      setFlashMsg(t('recs.dismissError', { err: String(e) }))
+    void call().catch((e) => {
+      setFlashMsg(t(errKey, { err: String(e) }))
     })
 
     // Fade-out (220ms) → eliminar localmente.
@@ -206,10 +208,29 @@ export function Recommendations() {
       prev ? prev.filter((r) => r.movie.id !== rec.movie.id) : prev,
     )
     setSel((i) => Math.max(0, Math.min(i, (items?.length ?? 1) - 2)))
-    setFlashMsg(
-      t('recs.dismissedFlash', { title: rec.movie.title }),
-    )
+    setFlashMsg(t(flashKey, { title: rec.movie.title }))
   }
+
+  const dismissCurrent = (rec: Recommendation) =>
+    removeCard(
+      rec,
+      () =>
+        dismissRecommendation(
+          rec.movie.id,
+          rec.movie.title,
+          rec.movie.poster_path,
+        ),
+      'recs.dismissedFlash',
+      'recs.dismissError',
+    )
+
+  const markWatchedCurrent = (rec: Recommendation) =>
+    removeCard(
+      rec,
+      () => markWatched(rec.movie.id, rec.movie.title, rec.movie.poster_path),
+      'recs.watchedFlash',
+      'recs.watchedError',
+    )
 
   // Auto-hide del toast de dismiss.
   useEffect(() => {
@@ -343,6 +364,12 @@ export function Recommendations() {
                 label: t('recs.menu.torrents'),
                 hint: '↵',
                 onClick: () => openTorrents(rec),
+              },
+              {
+                label: t('recs.menu.markWatched'),
+                onClick: () => {
+                  void markWatchedCurrent(rec)
+                },
               },
               {
                 label: t('home.dismiss'),

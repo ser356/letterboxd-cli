@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { type StreamStats } from '../../lib/api'
+import { useT } from '../../lib/i18n'
 import { formatSpeed } from './utils'
 import { LoadingDots } from './controls'
 
@@ -14,6 +15,7 @@ export function StremioLoader({
   logoUrl: string | null
   stats?: StreamStats | null
 }) {
+  const t = useT()
   const bytesPerSec = stats ? stats.down_mbps * 1024 * 1024 : 0
   const hasProgress = stats != null && stats.total_bytes > 0
   const pct = hasProgress
@@ -72,7 +74,7 @@ export function StremioLoader({
         <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.18em] text-dim drop-shadow-[0_1px_4px_rgba(0,0,0,0.9)]">
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
           <span>
-            Cargando<LoadingDots />
+            {t('player.loading')}<LoadingDots />
           </span>
         </div>
         {stats && (

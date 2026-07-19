@@ -6,22 +6,27 @@ import { TopNav } from '../components/TopNav'
 import {
   cacheInfo,
   clearCache,
+  clearDismissed,
+  clearWatched,
   formatSize,
   getPreferences,
   getUsername,
   hasSession,
   isTauri,
   listDismissed,
+  listWatched,
   logInfo,
   logout,
   openLogFolder,
   setPreferences,
   tmdbPoster,
   undismissRecommendation,
+  unmarkWatched,
   type AppLogInfo,
   type CacheEntry,
   type DismissedEntry,
   type Preferences,
+  type WatchedEntry,
 } from '../lib/api'
 import { useHotkeys, type Hotkey } from '../lib/hotkeys'
 import { getLocale, LOCALE_LABELS, setLocale, SUPPORTED_LOCALES, useT } from '../lib/i18n'
@@ -47,6 +52,7 @@ export function Settings() {
   const [prefs, setPrefs] = useState<Preferences | null>(null)
   const [caches, setCaches] = useState<CacheEntry[] | null>(null)
   const [dismissed, setDismissed] = useState<DismissedEntry[] | null>(null)
+  const [watched, setWatched] = useState<WatchedEntry[] | null>(null)
   const [log, setLog] = useState<AppLogInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -58,16 +64,18 @@ export function Settings() {
       return
     }
     try {
-      const [hasS, list, p, dis, li] = await Promise.all([
+      const [hasS, list, p, dis, wat, li] = await Promise.all([
         hasSession(),
         cacheInfo(),
         getPreferences(),
         listDismissed(),
+        listWatched(),
         logInfo(),
       ])
       setCaches(list)
       setPrefs(p)
       setDismissed(dis)
+      setWatched(wat)
       setLog(li)
       if (hasS) {
         setUsername(await getUsername())
@@ -137,6 +145,36 @@ export function Settings() {
       await undismissRecommendation(id)
       setDismissed((prev) => prev?.filter((e) => e.id !== id) ?? null)
       flash(t('settings.dismissed.restored', { title }))
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const onClearDismissedAll = async () => {
+    try {
+      await clearDismissed()
+      setDismissed([])
+      flash(t('settings.dismissed.allCleared'))
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const onRestoreWatched = async (id: number, title: string) => {
+    try {
+      await unmarkWatched(id)
+      setWatched((prev) => prev?.filter((e) => e.id !== id) ?? null)
+      flash(t('settings.watched.restored', { title }))
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const onClearWatchedAll = async () => {
+    try {
+      await clearWatched()
+      setWatched([])
+      flash(t('settings.watched.allCleared'))
     } catch (e) {
       setError(String(e))
     }
@@ -219,11 +257,19 @@ export function Settings() {
           title={t('settings.dismissed.section')}
           action={
             dismissed && dismissed.length > 0 ? (
-              <span className="text-[11px] tabular-nums text-dim">
-                {dismissed.length === 1
-                  ? t('settings.dismissed.count1')
-                  : t('settings.dismissed.count', { n: dismissed.length })}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] tabular-nums text-dim">
+                  {dismissed.length === 1
+                    ? t('settings.dismissed.count1')
+                    : t('settings.dismissed.count', { n: dismissed.length })}
+                </span>
+                <button
+                  onClick={onClearDismissedAll}
+                  className="focus-ring rounded-full border border-danger/40 px-3 py-1 text-[12px] text-danger hover:bg-danger/10"
+                >
+                  {t('settings.dismissed.clearAll')}
+                </button>
+              </div>
             ) : null
           }
         >
@@ -240,6 +286,45 @@ export function Settings() {
                   key={d.id}
                   entry={d}
                   onRestore={() => onRestoreDismissed(d.id, d.title)}
+                />
+              ))}
+            </ul>
+          )}
+        </Section>
+
+        <Section
+          title={t('settings.watched.section')}
+          action={
+            watched && watched.length > 0 ? (
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] tabular-nums text-dim">
+                  {watched.length === 1
+                    ? t('settings.watched.count1')
+                    : t('settings.watched.count', { n: watched.length })}
+                </span>
+                <button
+                  onClick={onClearWatchedAll}
+                  className="focus-ring rounded-full border border-danger/40 px-3 py-1 text-[12px] text-danger hover:bg-danger/10"
+                >
+                  {t('settings.watched.clearAll')}
+                </button>
+              </div>
+            ) : null
+          }
+        >
+          {watched === null ? (
+            <div className="text-[13px] text-muted">{t('common.loading')}</div>
+          ) : watched.length === 0 ? (
+            <p className="text-[13px] text-muted">
+              {t('settings.watched.empty')}
+            </p>
+          ) : (
+            <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+              {watched.map((w) => (
+                <WatchedCard
+                  key={w.id}
+                  entry={w}
+                  onRestore={() => onRestoreWatched(w.id, w.title)}
                 />
               ))}
             </ul>
@@ -609,6 +694,49 @@ function DismissedCard({
   onRestore,
 }: {
   entry: DismissedEntry
+  onRestore: () => void
+}) {
+  const t = useT()
+  const src = tmdbPoster(entry.poster_path, 'w342')
+  return (
+    <li className="flex flex-col gap-2 animate-card-in">
+      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-poster bg-surface-hi">
+        {src ? (
+          <img
+            src={src}
+            alt={entry.title}
+            loading="lazy"
+            draggable={false}
+            className="pointer-events-none h-full w-full select-none object-cover opacity-70"
+          />
+        ) : (
+          <div className="pointer-events-none flex h-full w-full items-center justify-center px-2 text-center text-[11px] text-dim">
+            {entry.title}
+          </div>
+        )}
+        <div className="absolute inset-0 bg-black/30" />
+      </div>
+      <div className="flex min-w-0 items-baseline justify-between gap-2">
+        <p className="truncate text-[12px] text-body">{entry.title}</p>
+      </div>
+      <button
+        onClick={onRestore}
+        className="focus-ring rounded-full border border-hairline px-3 py-1 text-[11px] text-body hover:border-accent hover:text-accent"
+      >
+        {t('home.restore')}
+      </button>
+    </li>
+  )
+}
+
+// Símetrico a `DismissedCard` — mismo layout, distinta i18n. Se
+// duplica en vez de compartir para que la lectura del render sea
+// obvia y las claves de traducción salgan explícitas.
+function WatchedCard({
+  entry,
+  onRestore,
+}: {
+  entry: WatchedEntry
   onRestore: () => void
 }) {
   const t = useT()

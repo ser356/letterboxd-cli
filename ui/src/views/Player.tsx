@@ -1115,12 +1115,12 @@ export function Player() {
     return (
       <div className="flex h-full items-center justify-center text-body">
         <div className="text-center">
-          <p className="text-[15px]">Sin datos de reproducci&oacute;n.</p>
+          <p className="text-[15px]">{t('player.noData')}</p>
           <button
             onClick={() => nav(-1)}
             className="mt-4 rounded-sm border border-hairline px-4 py-2 text-[13px] hover:bg-surface"
           >
-            Volver
+            {t('common.back')}
           </button>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { HotkeyBar } from '../components/HotkeyBar'
@@ -790,11 +790,15 @@ function formatMinutes(total: number): string {
  * de un "Buscando…" estático. Los mensajes rotan cada 1.8s para no
  * marear. */
 function TorrentSearchLoader() {
-  const messages = [
-    'Consultando indexadores (YTS, PirateBay, Knaben)\u2026',
-    'Filtrando series de TV, CAMs y torrents muertos\u2026',
-    'Refinando resultados por calidad y seeders\u2026',
-  ]
+  const t = useT()
+  const messages = useMemo(
+    () => [
+      t('torrents.loader.msg1'),
+      t('torrents.loader.msg2'),
+      t('torrents.loader.msg3'),
+    ],
+    [t],
+  )
   const [msgIdx, setMsgIdx] = useState(0)
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -809,8 +813,7 @@ function TorrentSearchLoader() {
         {messages[msgIdx]}
       </p>
       <p className="mt-1 text-[11px] text-muted">
-        Los indexadores tardan unos segundos. Consultamos varios en
-        paralelo y luego descartamos la basura antes de mostrarte la lista.
+        {t('torrents.loader.hint')}
       </p>
     </div>
   )

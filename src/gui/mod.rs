@@ -53,7 +53,7 @@ use crate::torrents::{
     self, merge_provider_statuses, release_starts_with, split_trailing_year, AudioHint, MovieQuery,
     ProviderStatus, Torrent,
 };
-
+use crate::watched::{self, WatchedEntry};
 pub(super) mod cache;
 use self::cache::{
     config_dir, current_ui_lang, load_search_cache, load_torrent_cache, normalize_query, now_unix,
@@ -412,12 +412,14 @@ async fn get_recommendations_page(
     // invalidar la caché entera.
     let dismissed = dismissed::load();
     let dismissed_ids = dismissed.ids();
+    let watched = watched::load();
+    let watched_ids = watched.ids();
     let guard = state.recs_pool.lock().await;
     let pool = guard.as_ref().expect("just rebuilt or was fresh");
     let filtered: Vec<Recommendation> = pool
         .enriched
         .iter()
-        .filter(|r| !dismissed_ids.contains(&r.movie.id))
+        .filter(|r| !dismissed_ids.contains(&r.movie.id) && !watched_ids.contains(&r.movie.id))
         .cloned()
         .collect();
 
@@ -488,6 +490,61 @@ async fn list_dismissed() -> Result<Vec<DismissedEntry>, String> {
     let mut entries = dismissed::load().entries;
     entries.sort_by_key(|e| std::cmp::Reverse(e.dismissed_at));
     Ok(entries)
+}
+
+/// Vacía por completo el catálogo de descartes. Ajustes → "Restablecer
+/// sugerencias descartadas".
+#[tauri::command]
+async fn clear_dismissed() -> Result<(), String> {
+    dismissed::clear().map_err(|e| e.to_string())
+}
+
+/// Marca una película como "vista". Igual que dismiss, la elimina del
+/// feed al instante y se persiste en `watched.json` para futuras
+/// páginas del scroll. Se guarda por separado del store de dismisses
+/// para que Ajustes pueda ofrecer dos catálogos y dos botones de
+/// "Restablecer" independientes.
+#[tauri::command]
+async fn mark_watched(
+    tmdb_id: u64,
+    title: String,
+    poster_path: Option<String>,
+) -> Result<(), String> {
+    let mut store = watched::load();
+    store.insert(WatchedEntry {
+        id: tmdb_id,
+        title,
+        poster_path,
+        watched_at: now_unix(),
+    });
+    watched::save(&store).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Quita una peli del catálogo de "vistas". Simétrico a
+/// `undismiss_recommendation`.
+#[tauri::command]
+async fn unmark_watched(tmdb_id: u64) -> Result<(), String> {
+    let mut store = watched::load();
+    store.remove(tmdb_id);
+    watched::save(&store).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Lista las pelis marcadas como vistas, ordenadas por más recientes
+/// primero. Alimenta el panel "Catálogo de vistas" en Ajustes.
+#[tauri::command]
+async fn list_watched() -> Result<Vec<WatchedEntry>, String> {
+    let mut entries = watched::load().entries;
+    entries.sort_by_key(|e| std::cmp::Reverse(e.watched_at));
+    Ok(entries)
+}
+
+/// Vacía por completo el catálogo de vistas. Ajustes → "Restablecer
+/// catálogo de vistas".
+#[tauri::command]
+async fn clear_watched() -> Result<(), String> {
+    watched::clear().map_err(|e| e.to_string())
 }
 
 /// Detalle de una película para el modal estilo Stremio: sinopsis,
@@ -2020,6 +2077,11 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             dismiss_recommendation,
             undismiss_recommendation,
             list_dismissed,
+            clear_dismissed,
+            mark_watched,
+            unmark_watched,
+            list_watched,
+            clear_watched,
             get_movie_view,
             get_series_view,
             get_series_season,
