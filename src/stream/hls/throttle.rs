@@ -142,6 +142,9 @@ struct Snapshot {
     dir: std::path::PathBuf,
     start_idx: u64,
     playhead: u64,
+    // Windows no lee `pid` — su rama del throttle mata el job entero
+    // (kill-and-resurrect) en lugar de SIGSTOP/SIGCONT al proceso.
+    #[cfg_attr(windows, allow(dead_code))]
     pid: Option<u32>,
     paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
