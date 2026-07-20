@@ -2,6 +2,9 @@
 name = "videodrome"
 version = "1.7.1"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["ser356"]
+repository = "https://github.com/ser356/videodrome"
 
 [[bin]]
 name = "videodrome"

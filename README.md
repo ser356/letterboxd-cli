@@ -462,3 +462,13 @@ Al abrir issue, adjunta el fichero del día. La app corre 100% local —
 el log solo contiene rangos de bytes servidos, timings de ffprobe/
 ffmpeg, y decisiones del scheduler de librqbit. Sin credenciales, sin
 infohashes, sin nombres de ficheros.
+
+---
+
+## Licencia
+
+Dual **MIT OR Apache-2.0**, a elección del consumidor — convención del
+ecosistema Rust. Ver [LICENSE.md](LICENSE.md), [LICENSE-MIT](LICENSE-MIT)
+y [LICENSE-APACHE](LICENSE-APACHE).
+
+Contribuciones aceptadas bajo los mismos términos, sin CLA.
