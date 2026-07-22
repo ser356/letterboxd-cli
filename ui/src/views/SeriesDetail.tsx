@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { TopNav } from '../components/TopNav'
+import { BackButton } from '../components/BackButton'
 import {
   getSeriesSeason,
   getSeriesView,
@@ -154,14 +155,7 @@ export function SeriesDetail() {
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-canvas">
-      <TopNav>
-        <button
-          onClick={() => nav(-1)}
-          className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
-        >
-          {t('common.back')}
-        </button>
-      </TopNav>
+      <TopNav back={<BackButton onClick={() => nav(-1)} />} />
 
       <main className="mx-auto w-full max-w-[1200px] flex-1 px-8 py-6">
         {error && (

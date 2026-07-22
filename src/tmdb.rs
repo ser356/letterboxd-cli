@@ -121,6 +121,45 @@ struct RecommendationsResponse {
     results: Vec<TmdbMovie>,
 }
 
+/// Filtros del endpoint `/discover/movie`. Se usan desde el dado
+/// atmosférico (`shuffle_pick`): las decisiones del usuario ("me
+/// apetece reír", "cortita", "clásico") las mapea el frontend a
+/// estos campos concretos.
+///
+/// Todos son `Option` — un `None` significa "no restrinjas por
+/// este eje". `with_genres` es unión (OR entre los ids), no
+/// intersección — TMDB con coma trata como AND, así que el mapper
+/// del frontend debe elegir un ÚNICO id salvo excepciones (ej.
+/// "escapar a otro mundo" mapea a SciFi 878 O Fantasy 14 con `|`
+/// entre ellos → representado como `Some(vec![878, 14])` con el
+/// mismo separador).
+#[cfg(feature = "gui")]
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverFilters {
+    /// Género(s) TMDB. Cuando se pasan varios, se separan con `|`
+    /// (OR) en la URL — construido en `discover_movies`.
+    pub with_genres: Option<Vec<u32>>,
+    pub release_year_gte: Option<u16>,
+    pub release_year_lte: Option<u16>,
+    pub runtime_gte: Option<u16>,
+    pub runtime_lte: Option<u16>,
+    pub vote_avg_gte: Option<f32>,
+}
+
+/// Respuesta del endpoint `/discover/movie` de TMDB. `total_pages`
+/// se usa como pool para el random del dado — pickeamos página
+/// aleatoria y luego una peli aleatoria dentro.
+#[cfg(feature = "gui")]
+#[derive(Debug, Deserialize)]
+pub struct DiscoverResponse {
+    #[allow(dead_code)]
+    pub page: u32,
+    pub results: Vec<TmdbMovie>,
+    pub total_pages: u32,
+    pub total_results: u32,
+}
+
 // ── Búsqueda por IMDb ID ────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +441,74 @@ impl<'a> TmdbClient<'a> {
     /// Persiste en disco la caché de recomendaciones acumulada en esta sesión.
     pub fn save_cache(&self) {
         save_cache(&self.cache.lock().expect("mutex poisoned"));
+    }
+
+    /// `/discover/movie` con filtros arbitrarios. Devuelve la página
+    /// `page` en el idioma actual, ordenada por popularidad
+    /// descendente. Se usa desde `shuffle_pick` (dado atmosférico
+    /// estilo Filmin): tres o cuatro decisiones del user se
+    /// traducen a `with_genres`, ventana de `release_date`,
+    /// `runtime` y umbral de votos, y de la pool resultante
+    /// escogemos una peli al azar.
+    ///
+    /// `vote_count.gte=100` mantiene fuera los rarezas sin
+    /// suficientes votos (harían sentir al user que el dado es una
+    /// tómbola de basura). El caller puede subir el umbral si
+    /// quiere pool más "curada".
+    #[cfg(feature = "gui")]
+    pub async fn discover_movies(
+        &self,
+        filters: &DiscoverFilters,
+        page: u32,
+    ) -> Result<DiscoverResponse> {
+        let mut url = format!(
+            "{BASE_URL}/discover/movie?language={loc}&include_adult=false&sort_by=popularity.desc&vote_count.gte=100&page={page}",
+            loc = self.locale,
+        );
+        if let Some(genres) = &filters.with_genres {
+            if !genres.is_empty() {
+                // `%7C` (pipe) = OR entre géneros. Con coma (`,`)
+                // TMDB los interpreta como AND (peli que sea
+                // acción Y comedia Y…) y la pool queda casi vacía.
+                let joined: Vec<String> = genres.iter().map(u32::to_string).collect();
+                url.push_str(&format!("&with_genres={}", joined.join("%7C")));
+            }
+        }
+        if let Some(y) = filters.release_year_gte {
+            url.push_str(&format!("&primary_release_date.gte={y}-01-01"));
+        }
+        if let Some(y) = filters.release_year_lte {
+            url.push_str(&format!("&primary_release_date.lte={y}-12-31"));
+        }
+        if let Some(r) = filters.runtime_gte {
+            url.push_str(&format!("&with_runtime.gte={r}"));
+        }
+        if let Some(r) = filters.runtime_lte {
+            url.push_str(&format!("&with_runtime.lte={r}"));
+        }
+        if let Some(v) = filters.vote_avg_gte {
+            url.push_str(&format!("&vote_average.gte={v}"));
+        }
+
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.bearer_token)
+            .send()
+            .await
+            .with_context(|| format!("discover: {url}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("TMDB discover fall\u{f3} ({status}): {body}");
+        }
+
+        let body: DiscoverResponse = resp
+            .json()
+            .await
+            .with_context(|| "no se pudo parsear discover response")?;
+        Ok(body)
     }
 
     /// Resuelve un IMDb ID a título + año usando el endpoint `/find`.

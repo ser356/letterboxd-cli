@@ -578,6 +578,118 @@ async fn get_movie_view(
     out
 }
 
+/// Fuente de aleatoriedad para el dado del `shuffle_pick`. NO
+/// necesitamos CSPRNG — un LCG sobre nanos del reloj basta para que
+/// cada tirada del user devuelva algo distinto. Sin `rand` como dep
+/// evitamos aumentar el bundle solo por esto.
+fn pseudo_random_index(n: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0);
+    // Multiplicador de LCG glibc — suficiente mezcla para nuestros
+    // rangos de N ≤ 500.
+    let mixed = nanos.wrapping_mul(1_103_515_245).wrapping_add(12345);
+    (mixed as usize) % n
+}
+
+/// Devuelve UNA película al azar del catálogo TMDB filtrando por
+/// los criterios pasados por el frontend (dado atmosférico estilo
+/// Filmin). Excluye las marcadas como vistas o descartadas.
+///
+/// Estrategia (rápida y suficientemente aleatoria):
+///   1. Query la primera página para conocer `total_pages`.
+///   2. Escoge página aleatoria en `[1, min(total_pages, 500)]`
+///      (TMDB rechaza pages > 500).
+///   3. Escoge una peli aleatoria de esa página.
+///   4. Si tras filtrar watched/dismissed no queda ninguna, reintenta
+///      con otra página (hasta 3 veces) antes de rendirse.
+///
+/// Devuelve `None` cuando el pool queda vacío después de los
+/// reintentos — el frontend pinta "no encontré nada, prueba con
+/// menos filtros".
+#[tauri::command]
+async fn shuffle_pick(
+    filters: crate::tmdb::DiscoverFilters,
+    state: State<'_, AppState>,
+) -> Result<Option<TmdbMovie>, String> {
+    let bearer = state.config.lock().await.tmdb_bearer_token.clone();
+    let tmdb = TmdbClient::new(&state.http, &bearer, current_ui_lang().as_deref());
+
+    // Cargar sets de exclusión UNA vez fuera del bucle de reintentos.
+    let watched_ids = watched::load().ids();
+    let dismissed_ids = dismissed::load().ids();
+
+    // Página 1 para descubrir el tamaño real del pool.
+    let first = tmdb
+        .discover_movies(&filters, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    let cap = first.total_pages.min(500).max(1);
+
+    tracing::info!(
+        target: "shuffle",
+        total_results = first.total_results,
+        total_pages = first.total_pages,
+        cap,
+        with_genres = ?filters.with_genres,
+        year_gte = ?filters.release_year_gte,
+        year_lte = ?filters.release_year_lte,
+        runtime_gte = ?filters.runtime_gte,
+        runtime_lte = ?filters.runtime_lte,
+        "shuffle_pick"
+    );
+
+    // Función local: filtra la página y elige uno al azar (o None).
+    let pick_from = |resp: crate::tmdb::DiscoverResponse| -> Option<TmdbMovie> {
+        let filtered: Vec<TmdbMovie> = resp
+            .results
+            .into_iter()
+            .filter(|m| !watched_ids.contains(&m.id) && !dismissed_ids.contains(&m.id))
+            .collect();
+        if filtered.is_empty() {
+            return None;
+        }
+        let idx = pseudo_random_index(filtered.len());
+        Some(filtered.into_iter().nth(idx).expect("idx < len"))
+    };
+
+    // Primer intento: página al azar.
+    let first_pick_page = pseudo_random_index(cap as usize) as u32 + 1;
+    if first_pick_page == 1 {
+        if let Some(m) = pick_from(first) {
+            return Ok(Some(m));
+        }
+    } else {
+        let resp = tmdb
+            .discover_movies(&filters, first_pick_page)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(m) = pick_from(resp) {
+            return Ok(Some(m));
+        }
+    }
+
+    // Hasta 2 reintentos con páginas distintas antes de rendirnos —
+    // solo entra si watched/dismissed vaciaron completamente la
+    // página escogida, cosa rara salvo pools mini.
+    for _ in 0..2 {
+        let page = pseudo_random_index(cap as usize) as u32 + 1;
+        let resp = tmdb
+            .discover_movies(&filters, page)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(m) = pick_from(resp) {
+            return Ok(Some(m));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Detalle de una serie para la vista SeriesDetail: metadata general
 /// (name, overview, poster, backdrop) + lista de temporadas + IMDb id
 /// (necesario para los providers direccionables por id — EZTV,
@@ -2472,6 +2584,7 @@ pub fn run(config: Config, http: reqwest::Client) -> anyhow::Result<()> {
             get_series_view,
             get_series_season,
             search_movies_tmdb,
+            shuffle_pick,
             search_torrents_by_tmdb,
             search_torrents_series,
             search_torrents_direct,

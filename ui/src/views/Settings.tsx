@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { Toast } from '../components/Toast'
 import { TopNav } from '../components/TopNav'
+import { BackButton } from '../components/BackButton'
 import {
   cacheInfo,
   clearCache,
@@ -204,14 +205,7 @@ export function Settings() {
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-canvas">
-      <TopNav>
-        <button
-          onClick={goBack}
-          className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
-        >
-          {t('common.back')}
-        </button>
-      </TopNav>
+      <TopNav back={<BackButton onClick={goBack} />} />
 
       <main className="mx-auto flex w-full max-w-[880px] flex-1 flex-col gap-10 px-8 py-8">
         <h1 className="text-[22px] font-semibold text-ink">{t('settings.title')}</h1>

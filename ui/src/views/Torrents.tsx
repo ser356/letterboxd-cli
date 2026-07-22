@@ -4,16 +4,19 @@ import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { ResumeDialog } from '../components/ResumeDialog'
 import { SearchBox } from '../components/SearchBox'
+import { BackButton } from '../components/BackButton'
 import { StreamPanel } from '../components/StreamPanel'
 import { TopNav } from '../components/TopNav'
 import {
   audioFlag,
+  dismissRecommendation,
   ffmpegAvailable,
   formatSize,
   getMovieView,
   getPreferences,
   getResume,
   isTauri,
+  markWatched,
   openMagnet,
   searchTorrentsByTmdb,
   searchTorrentsDirect,
@@ -464,14 +467,8 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
 
   return (
     <div className="flex h-[100dvh] flex-col bg-canvas">
-      <TopNav>
+      <TopNav back={<BackButton onClick={goBack} />}>
         <SearchBox compact />
-        <button
-          onClick={goBack}
-          className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
-        >
-          Volver
-        </button>
       </TopNav>
 
       <main className="mx-auto flex h-full min-h-0 w-full max-w-[1400px] flex-1 flex-col gap-4 px-8 py-6">
@@ -653,6 +650,48 @@ export function Torrents({ mode }: { mode: 'tmdb' | 'direct' | 'series' }) {
                 },
               },
             )
+            // Acciones sobre la peli/serie (no sobre el release
+            // concreto). Solo aparecen cuando conocemos `tmdbId`
+            // \u2014 sin \u00e9l no hay entrada v\u00e1lida en dismissed.json /
+            // watched.json. En modo `direct` (b\u00fasqueda libre por
+            // t\u00edtulo sin TMDB match) las escondemos.
+            if (
+              (mode === 'tmdb' || mode === 'series') &&
+              tmdbId &&
+              result?.title
+            ) {
+              const tid = Number(tmdbId)
+              if (Number.isFinite(tid)) {
+                // Poster para las cards del store: la `MovieView`
+                // (cache TMDB) lo trae; `TorrentSearchResult` no
+                // \u2014 ah\u00ed solo hay metadata del provider. Fallback
+                // a `null` si a\u00fan no carg\u00f3 la vista.
+                const posterPath = movieView?.poster_path ?? null
+                items.push(
+                  {
+                    label: t('recs.menu.markWatched'),
+                    onClick: () => {
+                      void markWatched(
+                        tid,
+                        result.title,
+                        posterPath,
+                      ).catch(() => {})
+                    },
+                  },
+                  {
+                    label: t('home.dismiss'),
+                    destructive: true,
+                    onClick: () => {
+                      void dismissRecommendation(
+                        tid,
+                        result.title,
+                        posterPath,
+                      ).catch(() => {})
+                    },
+                  },
+                )
+              }
+            }
             // `tor` no se usaba aparte del early-return; mantenemos
             // el shadow por si futuras entradas necesitan datos del
             // torrent seleccionado (calidad, source, etc.).

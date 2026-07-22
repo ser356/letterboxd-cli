@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { SearchBox } from '../components/SearchBox'
+import { BackButton } from '../components/BackButton'
 import { TopNav } from '../components/TopNav'
 import {
+  dismissRecommendation,
   getPreferences,
   isTauri,
+  markWatched,
   searchMoviesTmdb,
   tmdbPoster,
   type MovieHit,
@@ -39,6 +43,15 @@ export function SearchResults() {
    * refleja en vivo hasta re-abrir la vista; es aceptable porque el
    * user típicamente cambia una pref y vuelve al flow. */
   const [hideEmpty, setHideEmpty] = useState(false)
+
+  /** Estado del menú contextual (clic derecho sobre una card).
+   * Guarda las coords viewport y el índice del ítem en `visibleItems`.
+   * Cerrar = `null`. */
+  const [menu, setMenu] = useState<{
+    x: number
+    y: number
+    index: number
+  } | null>(null)
 
   useEffect(() => {
     if (!isTauri()) return
@@ -140,14 +153,8 @@ export function SearchResults() {
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-canvas">
-      <TopNav>
+      <TopNav back={<BackButton onClick={() => nav('/search')} />}>
         <SearchBox compact />
-        <button
-          onClick={() => nav('/search')}
-          className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-body hover:border-border-strong"
-        >
-          {t('common.back')}
-        </button>
       </TopNav>
 
       <main className="mx-auto w-full max-w-[1400px] flex-1 px-8 py-8">
@@ -198,6 +205,10 @@ export function SearchResults() {
                 active={i === sel}
                 onClick={() => openTorrents(m)}
                 onMouseEnter={() => setSel(i)}
+                onContextMenu={(x, y) => {
+                  setSel(i)
+                  setMenu({ x, y, index: i })
+                }}
               />
             ))}
           </ul>
@@ -205,6 +216,55 @@ export function SearchResults() {
       </main>
 
       <HotkeyBar hotkeys={hotkeys.filter((h) => h.hint)} />
+
+      {/* Menú contextual de resultados de búsqueda. Estilo idéntico
+          al de Recommendations / Torrents: "Marcar visto" y
+          "No sugerir" cuando conocemos el tmdb id (pelis; series
+          no soportadas por el store watched/dismissed hoy). El
+          fallback global "No hay acciones a realizar" NO se muestra
+          aquí porque preventDefault-eamos en la card. */}
+      {menu && visibleItems && visibleItems[menu.index] && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={((): ContextMenuItem[] => {
+            const m = visibleItems[menu.index]
+            const canAct = m.kind !== 'series' && m.id > 0
+            const items: ContextMenuItem[] = [
+              {
+                label: t('recs.menu.torrents'),
+                hint: '↵',
+                onClick: () => openTorrents(m),
+              },
+            ]
+            if (canAct) {
+              items.push(
+                {
+                  label: t('recs.menu.markWatched'),
+                  onClick: () => {
+                    void markWatched(m.id, m.title, m.poster_path).catch(
+                      () => {},
+                    )
+                  },
+                },
+                {
+                  label: t('home.dismiss'),
+                  destructive: true,
+                  onClick: () => {
+                    void dismissRecommendation(
+                      m.id,
+                      m.title,
+                      m.poster_path,
+                    ).catch(() => {})
+                  },
+                },
+              )
+            }
+            return items
+          })()}
+        />
+      )}
     </div>
   )
 }
@@ -214,11 +274,13 @@ function MovieCard({
   active,
   onClick,
   onMouseEnter,
+  onContextMenu,
 }: {
   movie: MovieHit
   active: boolean
   onClick: () => void
   onMouseEnter: () => void
+  onContextMenu: (x: number, y: number) => void
 }) {
   const t = useT()
   const year = movie.release_date?.slice(0, 4) ?? ''
@@ -229,6 +291,10 @@ function MovieCard({
       <button
         onClick={onClick}
         onMouseEnter={onMouseEnter}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          onContextMenu(e.clientX, e.clientY)
+        }}
         className="focus-ring group block w-full rounded-poster text-left"
       >
         <div

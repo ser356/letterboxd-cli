@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { FilmSlate, Magnet as MagnetIcon } from '@phosphor-icons/react'
 import { HotkeyBar } from '../components/HotkeyBar'
 import { TopNav } from '../components/TopNav'
+import { BackButton } from '../components/BackButton'
 import {
   formatSize,
   type ResolvedDroppedTorrent,
@@ -113,14 +114,7 @@ export function DroppedTorrent() {
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-canvas">
-      <TopNav>
-        <button
-          onClick={() => nav('/')}
-          className="focus-ring rounded-full border border-hairline px-4 py-1.5 text-[13px] text-body hover:border-border-strong"
-        >
-          {t('hotkey.back')}
-        </button>
-      </TopNav>
+      <TopNav back={<BackButton onClick={() => nav('/')} />} />
 
       <main className="mx-auto flex w-full max-w-[960px] flex-1 flex-col px-8 py-6">
         <div className="mb-4 flex items-baseline justify-between gap-4">

@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import './index.css'
+import { GlobalContextMenu } from './components/GlobalContextMenu'
 import { TorrentDropOverlay } from './components/TorrentDropOverlay'
 import {
   detectClientCapabilities,
@@ -53,6 +54,7 @@ async function bootstrap() {
     <StrictMode>
       <BrowserRouter>
         <TorrentDropOverlay />
+        <GlobalContextMenu />
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />

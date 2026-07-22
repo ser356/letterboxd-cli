@@ -211,12 +211,29 @@ export function useSubtitles(args: UseSubtitlesArgs): UseSubtitlesResult {
     }
     let cancelled = false
     ;(async () => {
+      console.info(
+        '[subs] vtt fetch start',
+        JSON.stringify({
+          source: activeSub.source,
+          streamUrl: stream?.url ?? null,
+          detail:
+            activeSub.source === 'openSubs'
+              ? { path: activeSub.path }
+              : { idx: activeSub.idx },
+        }),
+      )
       try {
         const vtt =
           activeSub.source === 'openSubs'
             ? await subtitleToVtt(activeSub.path)
             : await fetchEmbeddedSubtitle(stream?.url ?? '', activeSub.idx)
-        if (!cancelled) setRawVtt(vtt)
+        if (!cancelled) {
+          console.info(
+            '[subs] vtt fetch ok',
+            JSON.stringify({ source: activeSub.source, bytes: vtt.length }),
+          )
+          setRawVtt(vtt)
+        }
       } catch (e) {
         console.warn('vtt fetch failed:', e)
         // Defense-in-depth: si un `openSubs` no se puede leer (ruta

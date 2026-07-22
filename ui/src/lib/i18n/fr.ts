@@ -137,6 +137,7 @@ export const fr: Record<string, string> = {
   'home.optionRecsHint': 'Générer et parcourir des films recommandés basés sur votre historique.',
   'home.optionSearchLabel': 'Rechercher des torrents directement',
   'home.dismiss': 'Ne plus suggérer',
+  'menu.noActions': 'Aucune action disponible',
   'home.restore': 'Restaurer',
   'home.optionSearchHint': 'Tapez un titre et cherchez des torrents sans passer par Letterboxd.',
 

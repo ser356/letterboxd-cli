@@ -136,6 +136,7 @@ export const de: Record<string, string> = {
   'home.optionRecsHint': 'Filme auf Basis deiner Historie generieren und durchsuchen.',
   'home.optionSearchLabel': 'Torrents direkt suchen',
   'home.dismiss': 'Nicht mehr vorschlagen',
+  'menu.noActions': 'Keine Aktionen verfügbar',
   'home.restore': 'Wiederherstellen',
   'home.optionSearchHint': 'Titel eingeben und Torrents ohne Letterboxd suchen.',
 

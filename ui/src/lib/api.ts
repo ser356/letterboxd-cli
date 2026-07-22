@@ -186,6 +186,29 @@ export const getRecommendationsPage = (
 export const getMovieView = (tmdbId: number) =>
   invoke<MovieView | null>('get_movie_view', { tmdbId })
 
+/** Filtros para `shuffle_pick`. El frontend traduce las respuestas
+ * atmosféricas del dado (mood/era/duración/compañía) a estos
+ * campos concretos, TMDB los recibe en `/discover/movie`. Todos
+ * `undefined` = "no restrinjas por este eje".
+ *
+ * `withGenres` acepta múltiples ids que van a TMDB como OR (`|`).
+ * Ver `DiscoverFilters` en el backend. */
+export interface ShuffleFilters {
+  withGenres?: number[]
+  releaseYearGte?: number
+  releaseYearLte?: number
+  runtimeGte?: number
+  runtimeLte?: number
+  voteAvgGte?: number
+}
+
+/** Tirada del dado atmosférico. Devuelve una peli TMDB al azar
+ * dentro de los filtros pasados, excluyendo las ya marcadas como
+ * vistas o descartadas. `null` si el pool queda vacío tras filtrar
+ * (raro salvo con filtros muy agresivos). */
+export const shufflePick = (filters: ShuffleFilters) =>
+  invoke<Movie | null>('shuffle_pick', { filters })
+
 /** Marca una película como "no sugerir". El servidor solo persiste el
  * dismissed store; el frontend elimina localmente y la próxima página
  * del scroll infinito la filtrará. */

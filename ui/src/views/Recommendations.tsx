@@ -275,8 +275,7 @@ export function Recommendations() {
 
   return (
     <div className="flex min-h-[100dvh] flex-col bg-canvas">
-      <TopNav>
-        <BackButton onClick={() => nav('/')} />
+      <TopNav back={<BackButton onClick={() => nav('/')} />}>
         <SearchBox />
       </TopNav>
 

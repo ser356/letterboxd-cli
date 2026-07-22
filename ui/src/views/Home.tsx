@@ -60,16 +60,40 @@ export function Home() {
       .catch(() => setProgress([]))
   }, [])
 
-  // Navega al torrents/tmdb correspondiente. Como el resume ahora
-  // vive por-peli (no por-torrent), la vista Torrents disparará el
-  // ResumeDialog automáticamente al elegir cualquier release. NO
-  // navegamos directo al player con el `last_magnet` guardado
-  // porque:
-  //   1. El torrent viejo puede ya no tener seeders — dejar que el
-  //      user elija asegura una fuente viable.
-  //   2. Torrents.tsx pinta metadata bonita del título (sinopsis,
-  //      backdrop) que refuerza el "estás retomando esto".
+  // Click en una card de "Seguir viendo": si tenemos `last_magnet`
+  // guardado (entradas escritas por el player HTML tras nov-2026)
+  // navegamos DIRECTO al `/player` con ese torrent y arrancamos en
+  // la posición reportada \u2014 el user pidi\u00f3 "seguir viendo",
+  // llev\u00e1rle otra vez a la lista de torrents es fricci\u00f3n. Si el
+  // swarm est\u00e1 muerto, `useHlsAttach` capta el 503 `swarm_stalled`
+  // y el bot\u00f3n del error rebota a `/torrents/...` autom\u00e1ticamente
+  // (v\u00eda `torrentsRoute` derivado de `tmdbId` + episodio).
+  //
+  // Fallback para entradas legacy sin `last_magnet` (o series sin
+  // episodio concreto): al viejo `/torrents/...`, donde el user
+  // elige release y ResumeDialog aparecer\u00e1 gracias a `getResume`.
   const openProgress = (p: WatchProgress) => {
+    const canJumpToPlayer =
+      p.last_magnet &&
+      (p.kind === 'movie' || (p.season != null && p.episode != null))
+    if (canJumpToPlayer) {
+      nav('/player', {
+        state: {
+          magnet: p.last_magnet,
+          title: p.title,
+          imdbId: p.imdb_id,
+          tmdbId: p.tmdb_id,
+          subPath: null,
+          subRelease: null,
+          startSeconds: p.seconds > 0 ? p.seconds : 0,
+          season: p.kind === 'series' ? p.season : null,
+          episode: p.kind === 'series' ? p.episode : null,
+          isSeries: p.kind === 'series',
+          fileHint: null,
+        },
+      })
+      return
+    }
     if (p.kind === 'series' && p.season != null && p.episode != null) {
       nav(`/torrents/series/${p.tmdb_id}?season=${p.season}&episode=${p.episode}`)
       return

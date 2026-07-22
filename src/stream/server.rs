@@ -929,11 +929,19 @@ pub(super) async fn serve_embedded_subtitle(
     State(state): State<AppState>,
     axum::extract::Path(idx): axum::extract::Path<usize>,
 ) -> Result<Response, (StatusCode, String)> {
+    tracing::info!(target: "subs", event = "embedded_request", idx, "recibida");
     // Fast path: si ya lo extrajimos en esta sesión, devuelve el
     // buffer directamente sin tocar ffmpeg ni librqbit.
     {
         let cache = state.cached_embedded_subs.lock().await;
         if let Some(bytes) = cache.get(&idx) {
+            tracing::info!(
+                target: "subs",
+                event = "embedded_cache_hit",
+                idx,
+                bytes = bytes.len(),
+                "sirviendo desde cache"
+            );
             let mut resp = Response::new(Body::from((**bytes).clone()));
             resp.headers_mut().insert(
                 axum::http::header::CONTENT_TYPE,
@@ -950,6 +958,7 @@ pub(super) async fn serve_embedded_subtitle(
         "ffmpeg no encontrado".to_string(),
     ))?;
     let input_url = format!("http://{}/video_internal", state.local_addr);
+    let extraction_started = std::time::Instant::now();
 
     let output = {
         let mut cmd = tokio::process::Command::new(bin);
@@ -1040,6 +1049,15 @@ pub(super) async fn serve_embedded_subtitle(
         let mut cache = state.cached_embedded_subs.lock().await;
         cache.insert(idx, cached);
     }
+
+    tracing::info!(
+        target: "subs",
+        event = "embedded_extracted",
+        idx,
+        bytes = body.len(),
+        elapsed_ms = extraction_started.elapsed().as_millis() as u64,
+        "ffmpeg ok"
+    );
 
     let mut resp = Response::new(Body::from(body));
     resp.headers_mut().insert(
